@@ -96,17 +96,17 @@ cargo run --bin seed -- --out data/memory.db --data-dir ./data --hours 8 --count
 cargo run --release -- --no-camera --mock-sidecar
 ```
 
-`--mock-sidecar` 用 in-process 的確定性假模型取代 CUDA 推論,整條 API 都能跑。`/api/health` 會誠實回 `sidecar: "mock"`、`mode: "seed-only"`。
+`--mock-sidecar` 用 in-process 的確定性假模型取代 CUDA 推論,整條 API 都能跑(規則見 [`docs/sidecar.md` §8.5](./docs/sidecar.md#85-mock-sidecar))。`/api/health` 會誠實回 `sidecar: "mock"`、`mode: "seed-only"`。
 
 ### 環境變數
 
-全部 CLI flag 與 `MNEME_*` 環境變數見 [`docs/spec.md` §8.3](./docs/spec.md) —— 那裡是唯一真相,這裡不重複列表。最常需要現場調的是 `MNEME_DIFF_THRESHOLD`(change filter 閾值,預設 `12.0`)。
+全部 CLI flag 與 `MNEME_*` 環境變數見 [`docs/backend.md` §8.3](./docs/backend.md#83-cli-與環境變數) —— 那裡是唯一真相,這裡不重複列表。最常需要現場調的是 `MNEME_DIFF_THRESHOLD`(change filter 閾值,預設 `12.0`)。
 
 ---
 
 ## API
 
-完整契約見 [`docs/spec.md`](./docs/spec.md)。核心三支:
+對外 API 契約見 [`docs/spec.md`](./docs/spec.md);Rust 後端實作契約(schema / seed / 選型 / CLI)見 [`docs/backend.md`](./docs/backend.md);VLM / LLM / embedding sidecar 的 wire protocol 與 prompt 見 [`docs/sidecar.md`](./docs/sidecar.md)。核心三支:
 
 - `GET /api/events` — 事件列表,支援時間範圍與游標分頁
 - `POST /api/ask` — 自然語言問答,回答附事件引用與縮圖
