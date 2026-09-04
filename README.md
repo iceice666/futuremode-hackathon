@@ -78,7 +78,7 @@ python server.py --socket /tmp/vlm.sock
 
 # 2. 主程式
 cargo run --release -- \
-    --db memory.db \
+    --data-dir ./data \
     --camera /dev/video0 \
     --sidecar /tmp/vlm.sock \
     --bind 0.0.0.0:8080
@@ -92,23 +92,21 @@ cd bot && python main.py --api http://localhost:8080
 ### 沒有 Orin 也想試
 
 ```bash
-cargo run --bin seed -- --out memory.db --hours 8 --count 60   # 產生示範資料
-cargo run --release -- --db memory.db --no-camera --mock-sidecar
+cargo run --bin seed -- --out data/memory.db --data-dir ./data --hours 8 --count 60 --seed 42
+cargo run --release -- --no-camera --mock-sidecar
 ```
+
+`--mock-sidecar` 用 in-process 的確定性假模型取代 CUDA 推論,整條 API 都能跑。`/api/health` 會誠實回 `sidecar: "mock"`、`mode: "seed-only"`。
 
 ### 環境變數
 
-| 變數 | 預設 | 說明 |
-|---|---|---|
-| `MNEME_DIFF_THRESHOLD` | `12.0` | change filter 閾值,現場光線不同務必調整 |
-| `MNEME_COOLDOWN_MS` | `4000` | 觸發後的冷卻時間 |
-| `MNEME_CAPTURE_FPS` | `2` | 取樣率 |
+全部 CLI flag 與 `MNEME_*` 環境變數見 [`docs/spec.md` §8.3](./docs/spec.md) —— 那裡是唯一真相,這裡不重複列表。最常需要現場調的是 `MNEME_DIFF_THRESHOLD`(change filter 閾值,預設 `12.0`)。
 
 ---
 
 ## API
 
-完整契約見 [`SPEC.md`](./docs/SPEC.md)。核心三支:
+完整契約見 [`docs/spec.md`](./docs/spec.md)。核心三支:
 
 - `GET /api/events` — 事件列表,支援時間範圍與游標分頁
 - `POST /api/ask` — 自然語言問答,回答附事件引用與縮圖
@@ -129,8 +127,6 @@ cargo run --release -- --db memory.db --no-camera --mock-sidecar
 | Rust / Python 相依套件 | 見 `Cargo.toml`、`requirements.txt` | 各自授權 |
 
 本專案程式碼於 2026/09/04–09/06 賽期內撰寫,未使用團隊既有專案程式。示範用的 seed 資料為賽期內於現場錄製。
-
-> 交件前把上表的括號填掉。空著比寫錯還糟。
 
 ---
 
