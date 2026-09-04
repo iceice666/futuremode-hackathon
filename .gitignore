@@ -1,0 +1,10 @@
+# runtime data: frames, thumbs, SQLite (--data-dir default)
+/data/
+
+# venvs: main program uses --system-site-packages, sidecar has its own
+.venv/
+sidecar/.venv/
+
+*.egg-info/
+__pycache__/
+*.py[cod]

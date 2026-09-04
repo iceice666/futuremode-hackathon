@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mneme"
+version = "1.4.0"
+description = "Offline visual memory for a single space, on-device."
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+# docs/backend.md 8.2 is the only truth for this table. cv2 is deliberately
+# absent: JetPack ships it in system site-packages and `pip install
+# opencv-python` risks a 4-hour arm64 source build. Create the venv with
+# `--system-site-packages` instead.
+dependencies = [
+    "fastapi~=0.115",
+    "uvicorn[standard]~=0.30",
+    "sse-starlette~=2.1",
+    "numpy>=1.26",
+    "python-ulid~=2.0",
+]
+
+[tool.setuptools]
+packages = ["mneme", "mneme.api"]
