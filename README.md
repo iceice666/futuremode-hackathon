@@ -23,7 +23,7 @@ Mneme 讓裝置持續觀察一個空間,把每一件發生的事即時寫成一�
       │  1–2 fps
       ▼
   ┌─────────────────────────────────────────┐
-  │  Rust (tokio)                           │
+  │  Python (asyncio + FastAPI)             │
   │                                         │
   │  capture ─► change_filter ─► store ─────┼──► SQLite (WAL)
   │                  │              ▲       │      events / frames
@@ -31,7 +31,7 @@ Mneme 讓裝置持續觀察一個空間,把每一件發生的事即時寫成一�
   │                  ▼              │       │
   │            [unix socket]        │       │
   │                  │              │       │
-  │  axum HTTP API ◄─┴──────────────┘       │
+  │  FastAPI HTTP ◄──┴──────────────┘       │
   └──────┬──────────────────┬───────────────┘
          │                  │ /tmp/vlm.sock
          │                  ▼
@@ -50,9 +50,9 @@ Mneme 讓裝置持續觀察一個空間,把每一件發生的事即時寫成一�
 
 **1. change filter 擋在 VLM 前面。** VLM 是整條 pipeline 唯一昂貴的一段。畫面先降到 64×64 灰階算 mean absolute diff,超過閾值才放行,並加冷卻時間避免同一件事被重複描述。實測擋掉約九成畫面,這是 Orin 能即時運作的關鍵。
 
-**2. 推論留在 Python,orchestration 留在 Rust。** Jetson 上的 CUDA 生態綁在 Python,硬要用 Rust 綁定只會把時間花在編譯而不是產品。Rust 負責取樣、排程、儲存、檢索與 HTTP,透過 unix socket 上的 line-delimited JSON 跟 sidecar 溝通,兩邊各自發揮。
+**2. 推論跟 orchestration 分成兩個 process。** VLM 載入要吃掉數 GB GPU 記憶體、啟動要數十秒,而且模型崩了不該把 HTTP server 一起帶走。所以推論獨立成 sidecar,主程式負責取樣、排程、儲存、檢索與 HTTP,兩邊用 unix socket 上的 line-delimited JSON 溝通。兩邊都是 Python,但**不共用 process、不共用 venv** —— 主程式的環境裡沒有 torch,想重啟模型不用重啟 API。
 
-**3. 向量不用 extension。** 事件量級在數千筆,Rust 端直接暴力算 cosine 相似度,延遲遠低於一次 VLM 呼叫。省下的是編譯與部署的複雜度。
+**3. 向量不用 extension。** 事件量級在數千筆,啟動時把 embeddings 全讀進一塊 `float32` 陣列,一次 numpy matmul 算完 cosine,延遲遠低於一次 VLM 呼叫。省下的是部署複雜度。
 
 ### 為什麼需要本地硬體
 
@@ -65,19 +65,20 @@ Mneme 讓裝置持續觀察一個空間,把每一件發生的事即時寫成一�
 ### 需求
 
 - NVIDIA Jetson Orin ｜ JetPack 6.x ｜ CUDA 12.x
-- Rust 1.7x+、Python 3.10+
+- Python 3.10+(JetPack 6 內建)、系統 `cv2`(JetPack 內建,不要 pip 裝)
 - USB 攝影機
 
 ### 啟動
 
 ```bash
-# 1. 推論 sidecar(先跑,Rust 端會等 socket)
+# 1. 推論 sidecar(先跑,主程式會等 socket)
 cd sidecar
 pip install -r requirements.txt
 python server.py --socket /tmp/vlm.sock
 
 # 2. 主程式
-cargo run --release -- \
+python -m venv --system-site-packages .venv && .venv/bin/pip install -e .
+.venv/bin/python -m mneme \
     --data-dir ./data \
     --camera /dev/video0 \
     --sidecar /tmp/vlm.sock \
@@ -92,8 +93,8 @@ cd bot && python main.py --api http://localhost:8080
 ### 沒有 Orin 也想試
 
 ```bash
-cargo run --bin seed -- --out data/memory.db --data-dir ./data --hours 8 --count 60 --seed 42
-cargo run --release -- --no-camera --mock-sidecar
+.venv/bin/python -m mneme.seed --out data/memory.db --data-dir ./data --hours 8 --count 60 --seed 42
+.venv/bin/python -m mneme --no-camera --mock-sidecar
 ```
 
 `--mock-sidecar` 用 in-process 的確定性假模型取代 CUDA 推論,整條 API 都能跑(規則見 [`docs/sidecar.md` §8.5](./docs/sidecar.md#85-mock-sidecar))。`/api/health` 會誠實回 `sidecar: "mock"`、`mode: "seed-only"`。
@@ -106,7 +107,7 @@ cargo run --release -- --no-camera --mock-sidecar
 
 ## API
 
-對外 API 契約見 [`docs/spec.md`](./docs/spec.md);Rust 後端實作契約(schema / seed / 選型 / CLI)見 [`docs/backend.md`](./docs/backend.md);VLM / LLM / embedding sidecar 的 wire protocol 與 prompt 見 [`docs/sidecar.md`](./docs/sidecar.md)。核心三支:
+對外 API 契約見 [`docs/spec.md`](./docs/spec.md);後端實作契約(schema / seed / 選型 / CLI)見 [`docs/backend.md`](./docs/backend.md);VLM / LLM / embedding sidecar 的 wire protocol 與 prompt 見 [`docs/sidecar.md`](./docs/sidecar.md)。核心三支:
 
 - `GET /api/events` — 事件列表,支援時間範圍與游標分頁
 - `POST /api/ask` — 自然語言問答,回答附事件引用與縮圖
@@ -124,7 +125,7 @@ cargo run --release -- --no-camera --mock-sidecar
 | Embedding 模型 |  |  |
 | LLM 權重 |  |  |
 | JetPack / CUDA | NVIDIA 官方映像 | NVIDIA 授權條款 |
-| Rust / Python 相依套件 | 見 `Cargo.toml`、`requirements.txt` | 各自授權 |
+| Python 相依套件 | 見 `pyproject.toml`、`sidecar/requirements.txt` | 各自授權 |
 
 本專案程式碼於 2026/09/04–09/06 賽期內撰寫,未使用團隊既有專案程式。示範用的 seed 資料為賽期內於現場錄製。
 

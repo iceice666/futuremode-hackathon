@@ -1,4 +1,4 @@
-# 離線視覺記憶 — 介面契約 v1.3
+# 離線視覺記憶 — 介面契約 v1.4
 
 三人平行開工用。**對外介面的唯一真相來源是這一份**,改動要先在群組講一聲並更新版本號。
 
@@ -13,6 +13,8 @@
 | [`docs/sidecar.md`](./sidecar.md) | §3.1 wire protocol、§3.2 prompt 契約、§8.5 mock sidecar | 寫 VLM / LLM / embedding 推論的人 |
 
 節號在三份文件之間連續、不重複,所以既有的 `§2.6` `§8.3` 這類引用不會歧義。跨檔引用一律寫成 `backend.md §8.3` / `sidecar.md §3.2`。
+
+**v1.4 改了什麼**(v1.3 → v1.4):後端實作語言從 Rust 換成 Python(asyncio + FastAPI),細節全在 `backend.md` v1.4。**這份文件的對外契約零變更** —— §0、§2 的 JSON、欄位、分頁語意、錯誤 code、拒答門檻全部原樣;只把 §2.7 / §3 / §5 / §7 / §8 裡「Rust」這個字換成「後端」,並把 §7 的 `nokhwa` 那條退路改成 cv2 的版本
 
 **v1.3 改了什麼**(v1.2 → v1.3):把 §3.1 / §3.2 / §8.5 從 `backend.md` 再拆到 `docs/sidecar.md`。對外行為沒動。
 
@@ -209,13 +211,13 @@ data: {"ts":"2026-09-05T14:03:36.000Z"}
 
 ### 2.7 靜態檔案與 CORS
 
-- Rust server 把 `--static-dir`(預設 `./web`)掛在 `/`,`/api/*` 的路由優先
+- 後端把 `--static-dir`(預設 `./web`)掛在 `/`,`/api/*` 的路由優先
 - 路徑不以 `/api` 開頭又找不到檔案 → 回 `index.html`(SPA fallback),讓 Bryan 用前端 router 沒問題
-- Bryan 開發時跑自己的 dev server:Rust 端一律回 `Access-Control-Allow-Origin: *`。反正不做 auth,沒有風險
+- Bryan 開發時跑自己的 dev server:後端一律回 `Access-Control-Allow-Origin: *`。反正不做 auth,沒有風險
 
 ---
 
-## 3. Rust ↔ Python sidecar 契約
+## 3. 主程式 ↔ 推論 sidecar 契約
 
 wire protocol 與 prompt 契約搬到 [`docs/sidecar.md` §3.1 / §3.2](./sidecar.md#31-wire-protocol);pipeline 形狀(§3.3)在 [`docs/backend.md`](./backend.md#33-pipeline-形狀)。純內部協議,對 §2 的外部行為沒有影響。
 
@@ -231,8 +233,8 @@ wire protocol 與 prompt 契約搬到 [`docs/sidecar.md` §3.1 / §3.2](./sideca
 
 | 人 | 負責 | 交付的東西 |
 |---|---|---|
-| iceice666 | capture / filter / sidecar / store / 所有 HTTP endpoint | 一個跑得起來的 binary + seed 工具 |
-| Bryan | timeline web UI、health 面板 | 靜態檔案放 `web/`,由 Rust server 直接 serve,規則見 §2.7 |
+| iceice666 | capture / filter / sidecar / store / 所有 HTTP endpoint | 一個跑得起來的服務(`python -m mneme`)+ seed 工具 |
+| Bryan | timeline web UI、health 面板 | 靜態檔案放 `web/`,由後端直接 serve,規則見 §2.7 |
 | coffeecat | LINE bot(webhook → `/api/ask` → 回文字 + 圖) | 獨立 process,只依賴第 2 節 |
 
 **唯一的跨人依賴是第 2 節的 JSON 格式。** 其他都各做各的。
@@ -257,7 +259,7 @@ wire protocol 與 prompt 契約搬到 [`docs/sidecar.md` §3.1 / §3.2](./sideca
 | LLM 問答品質差 | `/api/ask` 退化成純向量檢索,只回事件卡片不回自然語言 |
 | 現場網路爛,LINE webhook 進不來 | Web UI 要有一個功能完全相同的問答輸入框,當主 demo |
 | 相機在現場光線下 filter 亂觸發 | 閾值走環境變數,現場調;真的不行就固定間隔取樣 |
-| `nokhwa` 在 Jetson 上抓不到 camera | 用 `--camera-cmd`(backend.md §8.3)跑 `ffmpeg -f v4l2 … -f image2` 寫檔到 `<data-dir>/incoming`,capture 改成 watch 那個目錄 |
+| `cv2.VideoCapture` 在 Jetson 上抓不到 camera | 用 `--camera-cmd`(backend.md §8.3)跑 `ffmpeg -f v4l2 … -f image2` 寫檔到 `<data-dir>/incoming`,capture 改成 watch 那個目錄 |
 
 每一條退路都要在 T+30h 前實際測過一次,不能只寫在紙上。
 
