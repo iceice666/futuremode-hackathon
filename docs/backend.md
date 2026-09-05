@@ -1,4 +1,4 @@
-# 離線視覺記憶 — 後端契約 v1.5
+# 離線視覺記憶 — 後端契約 v1.6
 
 Python 後端(iceice666 / 後端 agent)的實作真相來源。對外承諾在 [`docs/spec.md`](./spec.md),推論契約在 [`docs/sidecar.md`](./sidecar.md)。**三份文件的節號連續、不重複**:
 
@@ -256,6 +256,8 @@ python -m venv --system-site-packages .venv && .venv/bin/pip install -e .
 - 3000 筆 × 1024 維 f32 = 12.3MB,實測一次檢索(matmul + 取前 5 + 排序)約 0.06ms,遠低於一次 VLM 呼叫。**不要引 sqlite-vec、不要引 faiss**
 - 所有向量**入庫前就 L2 normalize**(`v / np.linalg.norm(v)`),cosine 退化成 dot product。normalize 前先擋 `norm == 0`,不然會產出一整排 `nan` 分數,拒答門檻就失效了
 - `score` 用 `float(scores[i])` 轉回 Python float 再進 JSON。**不要把 `np.float32` 丟給 `json`**,它不是 JSON serializable,會在 `/api/ask` 炸 500
+- **時間範圍是一段連續的 row(v1.6 新增)。** index 依時間排序 —— live 是按發生順序 append,啟動時 `load_embeddings` 用 `ORDER BY ev.ts, ev.id`。所以 index 另外存一條跟 `ids` 平行的 ISO 時間字串 list,`since`/`until`(spec.md §2.4)用 `bisect` 找出 `[lo, hi)` 兩個 row index,matmul 只算那一段。**ISO 8601 UTC 的字典序就是時間序**,所以這是字串二分,不是每次問答 parse 幾千個時間戳。「最新 N 筆」是同一件事的特例(`lo = hi - N`),於是**限縮範圍讓檢索變快,不是變慢**
+- 同分時新的排前面:`np.lexsort((-candidates, -scores[candidates]))`(lexsort 的主鍵在最後)。理由在 spec.md §2.4
 - 啟動時偵測到維度跟 `--embed-dim` 不符的向量:log error 並**拒絕啟動**,不要靜靜跳過 —— 混維度會讓分數變成垃圾而且很難查
 
 ### 8.8 驗收(交付前自己跑過,全部要過)

@@ -523,8 +523,12 @@ async def check_retrieval_and_refusal(
         f"embedded {len(corpus)} summaries in {elapsed:.1f}s "
         f"({elapsed / len(corpus) * 1000:.0f}ms each)"
     )
+    # No timestamps: load_corpus hands us newest-first, so this index is not
+    # chronological and time windows would be wrong on it. Nothing here asks
+    # for one -- this section checks ranking, not scoping.
     index = load_index(
-        [(f"evt_{i}", EMBED_DIM, v.tobytes()) for i, v in enumerate(vectors)], EMBED_DIM
+        [(f"evt_{i}", EMBED_DIM, v.tobytes(), "") for i, v in enumerate(vectors)],
+        EMBED_DIM,
     )
     report.check("index accepted every real vector", index.count == len(corpus))
 

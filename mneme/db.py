@@ -337,10 +337,8 @@ class Database:
     async def events_by_ids(self, ids: Sequence[str]) -> dict[str, EventRow]:
         return await self._read(self._events_by_ids, ids)
 
-    def _get_frame(self, frame_id: str) -> FrameRow | None:
-        row = self.reader().execute("SELECT * FROM frames WHERE id = ?", (frame_id,)).fetchone()
-        if row is None:
-            return None
+    @staticmethod
+    def _frame_row(row: sqlite3.Row) -> FrameRow:
         return FrameRow(
             id=row["id"],
             ts=row["ts"],
@@ -350,16 +348,40 @@ class Database:
             height=row["height"],
         )
 
+    def _get_frame(self, frame_id: str) -> FrameRow | None:
+        row = self.reader().execute("SELECT * FROM frames WHERE id = ?", (frame_id,)).fetchone()
+        return None if row is None else self._frame_row(row)
+
     async def get_frame(self, frame_id: str) -> FrameRow | None:
         return await self._read(self._get_frame, frame_id)
 
-    def load_embeddings(self) -> list[tuple[str, int, bytes]]:
-        """Startup-only full scan; runs before the server accepts traffic."""
+    def _latest_frame(self) -> FrameRow | None:
+        row = self.reader().execute(
+            "SELECT * FROM frames ORDER BY ts DESC, id DESC LIMIT 1"
+        ).fetchone()
+        return None if row is None else self._frame_row(row)
+
+    async def latest_frame(self) -> FrameRow | None:
+        """The most recent frame kept by the change filter.
+
+        Fresher than the newest *event*: a frame is written before the VLM runs,
+        and describing one costs ~14s on the Orin. This is as live as the UI can
+        get -- the camera allows a single Argus session and the capture pipeline
+        already holds it, so nothing else can read the sensor.
+        """
+        return await self._read(self._latest_frame)
+
+    def load_embeddings(self) -> list[tuple[str, int, bytes, str]]:
+        """Startup-only full scan; runs before the server accepts traffic.
+
+        Ordered by `ts` so the search index is chronological, which is what
+        makes a time-windowed question a slice (search.py `rows_between`).
+        """
         rows = self.reader().execute(
-            "SELECT e.event_id, e.dim, e.vec FROM embeddings e "
+            "SELECT e.event_id, e.dim, e.vec, ev.ts FROM embeddings e "
             "JOIN events ev ON ev.id = e.event_id ORDER BY ev.ts, ev.id"
         )
-        return [(r["event_id"], r["dim"], r["vec"]) for r in rows]
+        return [(r["event_id"], r["dim"], r["vec"], r["ts"]) for r in rows]
 
     # -- writes ---------------------------------------------------------
 
