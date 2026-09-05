@@ -11,3 +11,9 @@ sidecar/.venv/
 *.egg-info/
 __pycache__/
 *.py[cod]
+
+# the telegram bot token, read by bot/telegram_bot.py at startup
+.env
+
+# process logs written by ./start.sh
+/run/
