@@ -17,11 +17,23 @@ STATUS_FOR_CODE = {
     "INVALID_PARAM": 400,
     "INVALID_CURSOR": 400,
     "FRAME_NOT_FOUND": 404,
+    "NOT_FOUND": 404,
+    "METHOD_NOT_ALLOWED": 405,
     "SIDECAR_UNAVAILABLE": 503,
     "SIDECAR_TIMEOUT": 504,
     "SIDECAR_FAILED": 502,
     "INTERNAL": 500,
 }
+"""spec.md 2.6. Every response pairs a code with exactly this status, so the
+reverse lookup below can never emit a combination outside the table."""
+
+CODE_FOR_STATUS = {
+    404: "NOT_FOUND",
+    405: "METHOD_NOT_ALLOWED",
+}
+"""Starlette raises bare HTTPExceptions for routing failures, which carry no
+code of ours. `FRAME_NOT_FOUND` must not be the answer for an unknown route:
+that would tell the frontend a frame is missing when the path is simply wrong."""
 
 
 class ApiError(Exception):
@@ -38,6 +50,13 @@ def error_response(code: str, message: str, status: int | None = None) -> JSONRe
     return JSONResponse(
         status_code=status if status is not None else STATUS_FOR_CODE.get(code, 500),
         content={"error": {"code": code, "message": message}},
+        # spec.md 2.7 promises this header unconditionally, but an unhandled
+        # exception is served by ServerErrorMiddleware, which sits *outside*
+        # CORSMiddleware -- so a 500 would otherwise reach Bryan's dev server
+        # as an opaque CORS failure instead of the message above. Setting it
+        # here covers every error path; CORSMiddleware overwrites it with the
+        # same value on the paths it does wrap.
+        headers={"Access-Control-Allow-Origin": "*"},
     )
 
 
@@ -82,9 +101,10 @@ def install_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(StarletteHTTPException)
     async def _http(_: Request, exc: StarletteHTTPException) -> JSONResponse:
-        # Statuses outside the taxonomy (405, 406, ...) keep their own code
-        # rather than being flattened into a misleading 500.
-        code = next((c for c, s in STATUS_FOR_CODE.items() if s == exc.status_code), "INTERNAL")
+        # Routing failures raised by Starlette itself. Anything we did not name
+        # in CODE_FOR_STATUS is genuinely unexpected, so it keeps its own status
+        # with INTERNAL rather than being dressed up as a taxonomy code.
+        code = CODE_FOR_STATUS.get(exc.status_code, "INTERNAL")
         return error_response(code, str(exc.detail), status=exc.status_code)
 
     @app.exception_handler(Exception)
