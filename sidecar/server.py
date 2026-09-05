@@ -31,7 +31,13 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import numpy as np
-from prompts import ANSWER_SYSTEM, DESCRIBE_PROMPT, OBJECTS_PROMPT, REFUSAL
+from prompts import (
+    ANSWER_EXAMPLES,
+    ANSWER_SYSTEM,
+    DESCRIBE_PROMPT,
+    OBJECTS_PROMPT,
+    REFUSAL,
+)
 
 log = logging.getLogger("sidecar")
 
@@ -220,6 +226,7 @@ class MLXBackend:
         joined = "\n".join(context)
         messages = [
             {"role": "system", "content": ANSWER_SYSTEM},
+            *ANSWER_EXAMPLES,
             {"role": "user", "content": f"觀察記錄:\n{joined}\n\n問題:{question}"},
         ]
         prompt = self._llm_tok.apply_chat_template(
@@ -450,6 +457,7 @@ class CudaBackend:
         joined = "\n".join(context)
         messages = [
             {"role": "system", "content": ANSWER_SYSTEM},
+            *ANSWER_EXAMPLES,
             {"role": "user", "content": f"觀察記錄:\n{joined}\n\n問題:{question}"},
         ]
         if self._llm_url:

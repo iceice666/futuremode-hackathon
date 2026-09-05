@@ -112,6 +112,7 @@ class SidecarProcess:
         backend: str = "mlx",
         quantize: bool = False,
         models: dict[str, str | None] | None = None,
+        embed_device: str = "cuda",
     ) -> None:
         self.socket_path = socket_path
         self.data_dir = data_dir
@@ -119,6 +120,7 @@ class SidecarProcess:
         self.backend = backend
         self.quantize = quantize
         self.models = models or {}
+        self.embed_device = embed_device
         self.proc: asyncio.subprocess.Process | None = None
 
     async def start(self) -> None:
@@ -143,6 +145,11 @@ class SidecarProcess:
         for flag, name in self.models.items():
             if name:
                 argv += [f"--{flag}", name]
+        # Verifying the deployed shape matters more than verifying a tidy one:
+        # on the Orin the models are served by a co-resident vLLM, and a sidecar
+        # that loaded them locally instead would not fit beside it.
+        if self.embed_device != "cuda":
+            argv += ["--embed-device", self.embed_device]
         print(f"  launching {' '.join(argv[1:])}")
         self.proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -685,7 +692,14 @@ async def run(args: argparse.Namespace) -> int:
         python,
         args.backend,
         args.quantize,
-        {"vlm": args.vlm, "llm": args.llm, "embed": args.embed},
+        {
+            "vlm": args.vlm,
+            "llm": args.llm,
+            "embed": args.embed,
+            "vlm-url": args.vlm_url,
+            "llm-url": args.llm_url,
+        },
+        args.embed_device,
     )
     await process.start()
 
@@ -775,6 +789,14 @@ def main(argv: list[str] | None = None) -> int:
             default=None,
             help=f"override the sidecar's {flag} model (default: the backend's own)",
         )
+    parser.add_argument("--vlm-url", default=None)
+    parser.add_argument("--llm-url", default=None)
+    parser.add_argument(
+        "--embed-device",
+        choices=("cuda", "cpu"),
+        default="cuda",
+        help="matches the sidecar flag; use cpu when a served model holds the GPU",
+    )
     parser.add_argument(
         "--camera",
         default="0",
