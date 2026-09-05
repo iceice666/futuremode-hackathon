@@ -5,6 +5,9 @@
 .venv/
 sidecar/.venv/
 
+# upstream clone (its own git repo) plus the HF model cache it holds -- ~30GB
+/vLLM/jetson-containers/
+
 *.egg-info/
 __pycache__/
 *.py[cod]
