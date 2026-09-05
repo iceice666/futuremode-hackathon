@@ -238,11 +238,12 @@ python -m venv --system-site-packages .venv && .venv/bin/pip install -e .
 
 - **uvicorn 固定 1 worker**。in-memory 檢索表(§8.7)、SSE broadcast、pipeline queue 全都在 process 記憶體裡,開多 worker 會變成幾份互不相通的狀態 —— 事件推播漏一半、`queue_depth` 亂跳。要靠多核就靠 sidecar 的 GPU,不是靠 web worker
 - 寫入路徑只有 store 一條:一個專用的寫連線,包在 `asyncio.Lock` 裡序列化,所有寫都 `await asyncio.to_thread(...)`。不會有寫寫衝突
-- 讀連線用 `threading.local()` 給每個 executor thread 一條,`sqlite3.connect(..., check_same_thread=False)` 只用在寫連線上。連線數自然收在 `to_thread` 的 executor 上限,不用另外接 pool 套件
+- **讀取不進 thread pool,直接在 event loop 上跑。** `_sqlite3` 每次 `sqlite3_step` 前後都會 release/acquire GIL,把 sub-millisecond 的查詢丟去 `to_thread`,GIL 交接成本遠大於查詢本身:實測(ab、keep-alive)`GET /api/events?limit=50` 從 c=1 的 1558 rps 掉到 c=32 的 277 rps,CPU/req 從 0.46ms 漲到 12.9ms,燒掉約 3.7 核卻做更少的事。同一支 server 改成 inline 之後 c=32 穩在約 2450 rps(8.8×)。一次讀取是 0.07–1.1ms 的工作(20k events 取 200 筆是最壞情況),比一次 GIL 交接還便宜,所以擋住 loop 是正確的取捨
+- 讀連線仍用 `threading.local()` 一條一 thread,`sqlite3.connect(..., check_same_thread=False)` 只用在寫連線上。實務上就是 loop thread 上那一條;保留 per-thread 間接層是為了讓「真的需要包進 `to_thread` 的讀取」仍然安全,不用另外接 pool 套件
 - `busy_timeout` 設 5000ms(`PRAGMA busy_timeout = 5000`)
 - 啟動時跑 `PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;`。**`foreign_keys` 是 per-connection**,每條新連線都要重下,不是開一次就算
 - schema 用 `CREATE TABLE IF NOT EXISTS` 在啟動時建好,寫 `meta.schema_version = 1`。**48 小時不做 migration framework**,schema 改了就砍 db 重 seed
-- 掃全庫的查詢包在 `asyncio.to_thread`,不要卡 event loop
+- 唯一掃全庫的查詢是啟動時的 `load_embeddings`,它跑在 bind port 之前(20k events 實測 0.05s、100k 0.27s),同步跑就好。**執行期不要有掃全庫的 handler** —— 需要的話才包 `asyncio.to_thread`,而那也代表該加索引了
 - `sqlite3` 的 `isolation_level=None` + 自己下 `BEGIN`/`COMMIT`,不要靠 module 的隱式交易 —— 隱式模式下 `SELECT` 不會被交易包住,行為會讓人誤判
 
 ### 8.7 檢索實作

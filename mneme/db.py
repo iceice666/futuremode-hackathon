@@ -4,8 +4,13 @@ Shape of the concurrency model:
 
 * one dedicated write connection, serialised behind an ``asyncio.Lock``;
   every write runs in ``asyncio.to_thread`` so the event loop never blocks.
-* one read connection per executor thread via ``threading.local()``. The pool
-  size is naturally bounded by the ``to_thread`` executor.
+* reads run inline on the event loop. They are sub-millisecond, and
+  ``_sqlite3`` releases the GIL around every step, so a thread pool turns
+  them into a lock convoy that costs an order of magnitude more than the
+  query — see ``Database._read``.
+* one read connection per thread via ``threading.local()``. In practice that
+  is a single connection on the loop thread; the per-thread indirection keeps
+  a read that does get wrapped in ``to_thread`` correct instead of unsafe.
 * ``isolation_level=None`` plus explicit ``BEGIN``/``COMMIT``. The implicit
   mode leaves ``SELECT`` outside the transaction, which misleads debugging.
 * ``PRAGMA foreign_keys`` is per connection, so every new connection re-runs
@@ -236,7 +241,21 @@ class Database:
         self._write.close()
 
     async def _read(self, fn, /, *args):
-        return await asyncio.to_thread(fn, *args)
+        """Reads run inline on the event loop, deliberately.
+
+        `_sqlite3` releases the GIL around every `sqlite3_step`, so dispatching
+        sub-millisecond queries to a thread pool costs far more in GIL
+        handoffs than the query itself: measured with ab, GET
+        /api/events?limit=50 fell from 1558 rps at c=1 to 277 rps at c=32
+        (0.46 -> 12.9 ms CPU per request, ~3.7 cores burnt) purely in lock
+        convoy. Inline the same endpoint holds ~2450 rps at c=32.
+
+        A read is 0.07-1.1 ms of work (the 200-row page over 20k events is the
+        worst case), which is cheaper than one handoff, so blocking the loop
+        for it is the correct trade. Writes keep `_mutate`: they are serialized
+        by `_write_lock` anyway, and one thread never convoys.
+        """
+        return fn(*args)
 
     async def _mutate(self, fn, /, *args):
         async with self._write_lock:
