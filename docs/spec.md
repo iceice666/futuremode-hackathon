@@ -1,4 +1,4 @@
-# 離線視覺記憶 — 介面契約 v1.5
+# 離線視覺記憶 — 介面契約 v1.6
 
 三人平行開工用。**對外介面的唯一真相來源是這一份**,改動要先在群組講一聲並更新版本號。
 
@@ -13,6 +13,8 @@
 | [`docs/sidecar.md`](./sidecar.md) | §3.1 wire protocol、§3.2 prompt 契約、§8.5 mock sidecar | 寫 VLM / LLM / embedding 推論的人 |
 
 節號在三份文件之間連續、不重複,所以既有的 `§2.6` `§8.3` 這類引用不會歧義。跨檔引用一律寫成 `backend.md §8.3` / `sidecar.md §3.2`。
+
+**v1.6 改了什麼**(v1.5 → v1.6):§2.6 補兩個**本來就會發生卻沒有 code 的情況** —— `NOT_FOUND`(404,路由不存在)與 `METHOD_NOT_ALLOWED`(405,方法不對)。以前這兩種會回表格外的組合(404 配 `FRAME_NOT_FOUND`、405 配 `INTERNAL`),前端照表分類會分錯。**現有七個 code 的語意與 HTTP 狀態零變更**;§2.4 的 `top_k` 從「超範圍報錯」改成契約本來就寫的「夾在 1–20」
 
 **v1.5 改了什麼**(v1.4 → v1.5):**§2.4 的拒答規則改寫** —— 實測真 bge-m3 的中文 cosine 有地板,單一分數門檻分不開「有發生」與「沒發生」(`sidecar.md` §8.9 第一則),所以語意拒答的責任正式歸給 `sidecar.md` §3.2 的 system prompt,`--ask-min-score` 降級成下限護欄。**JSON shape 一個欄位都沒動**,變的是可達組合:`answer` 是拒答句時 `citations` 可能非空。§2.6 錯誤 code、分頁語意、其他 endpoint 零變更
 
@@ -162,7 +164,7 @@ LINE bot 和 web 都打這支,行為完全一致。
 }
 ```
 
-`question` 必填,1–500 字,超出回 `INVALID_PARAM`。`top_k` 選填,預設 5,夾在 1–20。
+`question` 必填,1–500 字,超出回 `INVALID_PARAM`。`top_k` 選填,預設 5,**夾在 1–20 而不是報錯** —— 送 `50` 當 `20`,送 `0` 當 `1`,語意同 §2.2 的 `limit`。
 
 檢索與拒答規則,這節是 `/api/ask` 的全部行為:
 
@@ -204,13 +206,15 @@ data: {"ts":"2026-09-05T14:03:36.000Z"}
 |---|---|---|
 | `INVALID_PARAM` | 400 | query 或 body 欄位型別、範圍不對 |
 | `INVALID_CURSOR` | 400 | `cursor` 不是合法 id 格式 |
-| `FRAME_NOT_FOUND` | 404 | `/api/frames/{id}` 查不到 |
+| `FRAME_NOT_FOUND` | 404 | `/api/frames/{id}` 查不到那一張 frame |
+| `NOT_FOUND` | 404 | 路由不存在(例:`/api/nope`) |
+| `METHOD_NOT_ALLOWED` | 405 | 路由存在但方法不對(例:`POST /api/events`) |
 | `SIDECAR_UNAVAILABLE` | 503 | sidecar 沒連上或連線中斷 |
 | `SIDECAR_TIMEOUT` | 504 | sidecar 超過 `--sidecar-timeout-ms` 沒回 |
 | `SIDECAR_FAILED` | 502 | sidecar 回了 `Failed` |
 | `INTERNAL` | 500 | 其他 |
 
-前端只需要分三類處理:400 系列是自己參數錯、502/503/504 顯示「本地模型忙碌中,稍後再試」、500 顯示通用錯誤。
+前端只需要分三類處理:4xx 是自己參數或路徑錯、502/503/504 顯示「本地模型忙碌中,稍後再試」、500 顯示通用錯誤。**每個回應的 `code` 與 HTTP 狀態一定是這張表裡的組合**,不會出現表外的配對。
 
 ### 2.7 靜態檔案與 CORS
 
