@@ -1,0 +1,16 @@
+# Sidecar-only dependencies. This venv is separate from the main program's on
+# purpose (backend.md 8.2): the backend must never pull in torch or MLX.
+#
+#   Jetson Orin (--backend cuda):
+#     python -m venv .venv && .venv/bin/pip install -r requirements.txt
+#     torch/torchvision come from NVIDIA's JetPack wheels, NOT from PyPI --
+#     the PyPI arm64 wheels have no CUDA support. Install those first, from
+#     https://developer.download.nvidia.com/compute/redist/jp/, then this file.
+#
+#   macOS / Apple silicon (--backend mlx), the verification path:
+#     python -m venv .venv && .venv/bin/pip install -r requirements-mlx.txt
+
+transformers>=4.45
+accelerate>=0.34
+pillow>=10.3
+numpy>=1.26

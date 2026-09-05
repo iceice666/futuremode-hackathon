@@ -1,0 +1,25 @@
+# macOS / Apple silicon verification backend (`--backend mlx`).
+#
+# The Orin runs `--backend cuda` with requirements.txt; this file exists so the
+# wire protocol in docs/sidecar.md 3.1 and the prompt contract in 3.2 can be
+# exercised against *real* VLM + LLM + embedding inference on a Mac, instead of
+# only against the in-process mock. Same three models as the Orin, quantised
+# for MLX. Resident set is roughly 9GB, so a 32GB machine is comfortable.
+#
+#   python3 -m venv sidecar/.venv
+#   sidecar/.venv/bin/pip install -r sidecar/requirements-mlx.txt
+#   python scripts/verify_sidecar.py
+
+mlx-vlm>=0.6
+mlx-lm>=0.31
+mlx-embeddings>=0.1
+numpy>=1.26
+
+# Preprocessing only, NOT inference: every generation below runs on MLX/Metal.
+# transformers 5.x gates SmolVLM's image processor behind torch — even the PIL
+# variant resolves to a dummy placeholder without it — so `mlx_vlm.load` fails
+# with "Could not load any image processor class" on a torch-free venv. This is
+# also why the sidecar keeps its own venv (backend.md 8.2): the main program
+# must never pull these in.
+torch>=2.4
+torchvision>=0.19
