@@ -30,12 +30,20 @@ from .db import Database
 from .filter import ChangeFilter, downscale
 from .search import SearchIndex, load_index
 from .sidecar import Sidecar, build_sidecar
-from .store import Broadcaster, Frame, Store
+from .store import Broadcaster, Frame, LiveStream, Store, encode_live
 
 log = logging.getLogger(__name__)
 
 VLM_QUEUE_SIZE = 4
 """backend.md 3.3: the only place in the pipeline that ever backs up."""
+
+FILTER_INTERVAL_S = 0.5
+"""How often the change filter is allowed to look at a frame.
+
+The camera runs at 21fps so the browser gets a live picture (spec.md 2.8), but
+diffing all 21 would spend real CPU deciding not to describe frames the
+`--cooldown-ms` gate would have refused anyway. Twice a second is far finer
+than the 4s cooldown, so nothing the pipeline would have kept is missed."""
 
 OFFLINE_PROBE_HOST = "1.1.1.1"
 OFFLINE_PROBE_PORT = 443
@@ -52,6 +60,7 @@ class Runtime:
     store: Store
     broadcaster: Broadcaster
     fps: FpsMeter
+    live: LiveStream
     started_at: float
     device: str
     offline: bool = True
@@ -94,19 +103,31 @@ async def offline_probe(runtime: Runtime) -> None:
 
 
 async def capture_loop(runtime: Runtime, queue: asyncio.Queue[Frame]) -> None:
-    """capture -> change_filter -> bounded queue. Drops the oldest when full.
+    """capture -> live view + change_filter -> bounded queue.
 
-    Never `await queue.put()`: that would let the VLM stall capture and the
+    Every frame reaches the live view; only a sampled few are decoded for the
+    change filter, and fewer still reach the VLM. Drops the oldest when full:
+    never `await queue.put()`, that would let the VLM stall capture and the
     measured fps would collapse (backend.md 3.3).
     """
     config = runtime.config
     change_filter = ChangeFilter(config.diff_threshold, config.cooldown_ms)
     source = open_source(config)
+    last_look = 0.0
     try:
         async for frame in source:
             runtime.fps.mark()
-            small = await asyncio.to_thread(downscale, frame.mat)
-            if not change_filter.should_pass(small):
+            jpeg = frame.jpeg
+            if jpeg is None:
+                jpeg = await asyncio.to_thread(encode_live, frame.mat)
+            runtime.live.publish(jpeg, frame.ts)
+
+            now = time.monotonic()
+            if now - last_look < FILTER_INTERVAL_S:
+                continue
+            last_look = now
+            small = await asyncio.to_thread(_downscaled, frame)
+            if small is None or not change_filter.should_pass(small):
                 continue
             try:
                 queue.put_nowait(frame)
@@ -122,6 +143,19 @@ async def capture_loop(runtime: Runtime, queue: asyncio.Queue[Frame]) -> None:
     finally:
         with contextlib.suppress(Exception):
             await source.aclose()
+
+
+def _downscaled(frame: Frame):
+    """Decode + downscale in one thread hop. None for a frame cv2 cannot read.
+
+    A truncated JPEG must not end the capture loop -- the camera keeps running
+    and the next frame is usually fine.
+    """
+    try:
+        return downscale(frame.decode())
+    except Exception as exc:  # ValueError from us, cv2.error from cv2
+        log.debug("skipping an undecodable frame: %s", exc)
+        return None
 
 
 async def vlm_loop(runtime: Runtime, queue: asyncio.Queue[Frame]) -> None:
@@ -173,6 +207,7 @@ def build_runtime(config: Config) -> Runtime:
         store=store,
         broadcaster=broadcaster,
         fps=FpsMeter(),
+        live=LiveStream(),
         started_at=time.monotonic(),
         device=detect_device(),
     )

@@ -1,4 +1,4 @@
-# 離線視覺記憶 — 介面契約 v1.6
+# 離線視覺記憶 — 介面契約 v1.8
 
 三人平行開工用。**對外介面的唯一真相來源是這一份**,改動要先在群組講一聲並更新版本號。
 
@@ -146,7 +146,8 @@ LINE bot 和 web 都打這支,行為完全一致。
 
 ```json
 // Request
-{ "question": "我的充電器最後一次出現是什麼時候", "top_k": 5 }
+{ "question": "我的充電器最後一次出現是什麼時候", "top_k": 5,
+  "since": "2026-09-05T06:00:00Z", "until": "2026-09-05T08:00:00Z" }
 
 // Response
 {
@@ -166,9 +167,17 @@ LINE bot 和 web 都打這支,行為完全一致。
 
 `question` 必填,1–500 字,超出回 `INVALID_PARAM`。`top_k` 選填,預設 5,**夾在 1–20 而不是報錯** —— 送 `50` 當 `20`,送 `0` 當 `1`,語意同 §2.2 的 `limit`。
 
+`since` / `until` 選填(**v1.8 新增**),UTC ISO 8601,兩端都可以單獨給。**格式錯回 400 `INVALID_PARAM`,不會默默當成沒給** —— 問了一個看不見的範圍比報錯更糟。`until` 含它指到的那一整秒(`until=14:30` 讀得到 `14:30:59`)。範圍內沒有任何事件時走護欄路徑:固定拒答句、`citations` 給 `[]`,這是誠實的答案,那段時間我們就是沒看到東西。
+
 檢索與拒答規則,這節是 `/api/ask` 的全部行為:
 
-- `question` 送 sidecar `Embed` 拿向量,對全庫 embeddings 算 cosine,取前 `top_k`(實作見 backend.md §8.7)
+- `question` 送 sidecar `Embed` 拿向量,對庫內 embeddings 算 cosine,取前 `top_k`(實作見 backend.md §8.7)
+- **檢索範圍有三種,優先序固定**(v1.8 新增):
+  1. 有給 `since`/`until` → 只在那個時間窗內找。**呼叫端說了算**,問句裡有沒有「現在」都不影響
+  2. 沒給範圍,但問句包含現在式指示詞(`現在`/`现在`/`目前`/`此刻`/`當下`/`剛剛`/`刚刚`/`剛才`/`刚才`/`方才`/`最近`/`正在`/`眼前`/`這會兒`,以及英文的 `now`/`currently`/`just now`/`right now`/`at the moment`/`latest`)→ 只在**最新 40 筆事件**內找
+  3. 其他 → 全庫
+- 第 2 條是必要的,不是優化:事件 summary 只描述物件和動作,**從來不寫時間**,所以「目前」對 query 向量沒有任何貢獻。加上中文 cosine 地板高、分離度只有 ~0.1(下一條),八小時前拍到同一張桌子的畫面就會贏過一分鐘前的那張 —— 那正好是「現在」最不該得到的答案。窗口用「筆數」而不是「時長」:房間一小時沒動靜時,「現在桌上有什麼」還是該回答最後看到的東西,而不是拒答
+- 同分時**新的排前面**。兩張畫面同樣符合問句,不代表同樣是好答案 —— 「我的杯子在哪」問的是它現在在哪
 - `score` 就是**原始 cosine**,範圍 `[-1, 1]`,不正規化、不 rescale、不轉百分比。前端要顯示百分比自己換
 - **拒答有兩條路,prompt 那條才是主要的。** 真 bge-m3 的中文 cosine 有地板 —— 實測 grounded 問句 `馬克杯放在哪` 拿 0.813,**沒發生過**的 `有沒有人在跳舞` 拿 0.716,分離度只有 0.097(`sidecar.md` §8.9)。**單一 cosine 門檻分不開這兩者**,所以語意拒答由 `sidecar.md` §3.2 的 system prompt 負責:LLM 判斷 context 不足就回固定句 `"我沒有看到相關的畫面。"`,而 `citations` **仍照實附上檢索到的事件** —— 讓評審看得到我們檢索到什麼,只是不硬掰
 - **`--ask-min-score` 是下限護欄,不是語意判定。** 最高分 `< 門檻`(預設 `0.35`)才走這條:不呼叫 LLM,`answer` 固定回同一句拒答句,`citations` 給 `[]`。它擋的是空庫、壞向量、以及 mock sidecar 那種無關句 cosine 落在 0 附近的情形。**真模型上幾乎不會觸發,不要靠它拒答**;要改門檻必須拿真資料量過(`sidecar.md` §8.9),照 mock 的直覺設值只會讓它變裝飾
@@ -221,6 +230,41 @@ data: {"ts":"2026-09-05T14:03:36.000Z"}
 - 後端把 `--static-dir`(預設 `./web`)掛在 `/`,`/api/*` 的路由優先
 - 路徑不以 `/api` 開頭又找不到檔案 → 回 `index.html`(SPA fallback),讓 Bryan 用前端 router 沒問題
 - Bryan 開發時跑自己的 dev server:後端一律回 `Access-Control-Allow-Origin: *`。反正不做 auth,沒有風險
+
+### 2.8 即時畫面(v1.7 新增)
+
+記憶是取樣的,畫面是連續的 — 這兩個是不同的速率,故意的。VLM 每幾秒才描述一張,
+但攝影機以 21fps 在跑,web 前端要看到的是「現在這個房間」,不是「最後一次描述」。
+
+**`GET /api/frames/latest/thumb`** — 回 `image/jpeg`,change filter 最後留下的那一張
+(也就是最新一筆 event 對應的畫面,但比 event 早,描述還沒跑完就已經寫檔)。
+帶 `?full=1` 回原圖。`Cache-Control: no-store` — 這支的內容每秒都在變,不能快取。
+另外回兩個 header:`X-Frame-Id`、`X-Frame-Ts`。還沒有任何 frame 時回 404 `FRAME_NOT_FOUND`。
+
+**`GET /api/frames/live.mjpg`** — motion JPEG 串流,`Content-Type:
+multipart/x-mixed-replace; boundary=mnemeframe`,每個 part 是
+`Content-Type: image/jpeg` + `Content-Length` + 一張完整 JPEG。
+
+```
+--mnemeframe
+Content-Type: image/jpeg
+Content-Length: 87031
+
+<jpeg bytes>
+--mnemeframe
+...
+```
+
+- 前端就是一個 `<img src="/api/frames/live.mjpg">`,不需要 JS、codec 或 buffer
+- 送的是相機自己編出來的 bytes,後端不解碼也不重編,所以開著串流幾乎不花 Orin 的算力
+- 每個 client 只排一張:跟不上的瀏覽器拿到的是**最新**那張,不是積欠的那張
+- 20 秒沒有新畫面就關掉連線,client 自己重連(`<img>` 預設會)
+- `--no-camera` 且還沒有任何畫面時回 404 `FRAME_NOT_FOUND`,前端就退回去輪詢
+  `/api/frames/latest/thumb`
+
+送出去的 fps 就是 `--capture-fps`(Orin 上是 21);`/api/health` 的 `capture_fps` 量的是
+同一條流,所以兩邊會對得起來。**這不改變 VLM 的工作量** — 後端在 change filter 之前
+先把 21fps 抽樣到約 2/s,描述的頻率仍然由 `--diff-threshold` 和 `--cooldown-ms` 決定。
 
 ---
 

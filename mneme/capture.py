@@ -4,9 +4,9 @@ Two sources, same output:
 
 * ``cv2.VideoCapture`` on ``--camera`` (default),
 * an external writer started by ``--camera-cmd`` that drops JPEGs into
-  ``<data-dir>/incoming``; we read each file then delete it. That is the
-  documented escape hatch for Jetsons where cv2 cannot open the device
-  (spec.md 7).
+  ``<data-dir>/incoming``; we read each file then delete it, and forward the
+  bytes undecoded. That is the documented escape hatch for Jetsons where cv2
+  cannot open the device (spec.md 7).
 
 Every cv2 call goes through ``asyncio.to_thread``: cv2 releases the GIL, but a
 synchronous call still parks the event loop and makes SSE heartbeats and
@@ -58,6 +58,31 @@ class FpsMeter:
         cutoff = now - self.window_s
         while self._marks and self._marks[0] < cutoff:
             self._marks.popleft()
+
+
+MAX_BACKLOG = 4
+"""Incoming JPEGs we are willing to be behind before dropping the oldest."""
+
+JPEG_EOI = b"\xff\xd9"
+
+
+def _read_jpeg(path: Path) -> bytes | None:
+    """Bytes of a finished JPEG; None while the writer still has it open.
+
+    multifilesink closes each file before opening the next, so a complete file
+    ends in the end-of-image marker. Checking for it is cheaper and more certain
+    than racing on mtime, and a file that never completes is dropped rather than
+    retried forever.
+    """
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return b""
+    if not data.endswith(JPEG_EOI):
+        return None
+    with contextlib.suppress(OSError):
+        path.unlink()
+    return data
 
 
 def require_cv2() -> Any:
@@ -112,8 +137,12 @@ async def _drain_stderr(process: asyncio.subprocess.Process) -> None:
 async def incoming_frames(
     command: str, incoming_dir: Path, fps: float
 ) -> AsyncIterator[Frame]:
-    """Run `--camera-cmd` and consume the JPEGs it writes."""
-    cv2 = require_cv2()
+    """Run `--camera-cmd` and consume the JPEGs it writes.
+
+    The bytes are forwarded without decoding: at 21fps the live view is the only
+    consumer of most frames and it wants JPEG anyway, so a decode happens later
+    and only for the frames the change filter actually looks at.
+    """
     incoming_dir.mkdir(parents=True, exist_ok=True)
     process = await asyncio.create_subprocess_exec(
         *shlex.split(command),
@@ -131,16 +160,30 @@ async def incoming_frames(
             if not files:
                 await asyncio.sleep(poll_interval)
                 continue
+            # A live view that replays a backlog is not live. If the writer got
+            # ahead of us -- a slow pass, a paused event loop -- throw the stale
+            # middle away and carry on from the newest frames.
+            if len(files) > MAX_BACKLOG:
+                for path in files[:-MAX_BACKLOG]:
+                    with contextlib.suppress(OSError):
+                        path.unlink()
+                log.debug("dropped %d stale incoming frames", len(files) - MAX_BACKLOG)
+                files = files[-MAX_BACKLOG:]
+            served = 0
             for path in files:
-                mat = await asyncio.to_thread(cv2.imread, str(path))
-                # Delete unconditionally: a truncated file would otherwise be
-                # retried forever and wedge the pipeline.
-                with contextlib.suppress(OSError):
-                    path.unlink()
-                if mat is None:
-                    log.debug("skipping unreadable incoming frame %s", path.name)
+                data = await asyncio.to_thread(_read_jpeg, path)
+                if data is None:
+                    # Still being written (no end-of-image marker yet). Leave it
+                    # on disk; the next pass will find it closed.
+                    break
+                if not data:
                     continue
-                yield Frame(ts=datetime.now(timezone.utc), mat=mat)
+                served += 1
+                yield Frame(ts=datetime.now(timezone.utc), jpeg=data)
+            if not served:
+                # Everything on disk was half-written or unreadable; waiting is
+                # the only useful thing to do, and not waiting is a spin.
+                await asyncio.sleep(poll_interval)
     finally:
         if process.returncode is None:
             process.terminate()

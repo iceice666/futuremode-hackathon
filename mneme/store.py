@@ -8,6 +8,7 @@ subscribers.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -25,33 +26,124 @@ THUMB_WIDTH = 320
 """spec.md 0: thumbnails are always JPEG, 320px wide."""
 
 JPEG_QUALITY = 85
+
+LIVE_WIDTH = 960
+LIVE_QUALITY = 70
+"""The live MJPEG view is a picture of the room, not the archive copy; it is
+sent 21 times a second, so it is worth half the bytes."""
+
 BROADCAST_CAPACITY = 64
 """spec.md 2.5: slow clients drop events, we never resend."""
 
 
 @dataclass(slots=True)
 class Frame:
-    """A captured image on its way through the pipeline."""
+    """A captured image on its way through the pipeline.
+
+    `jpeg` is the camera's own bytes when the source already produced JPEG
+    (`--camera-cmd`), and `mat` is decoded from it only when something actually
+    needs pixels. At 21fps the live view forwards those bytes untouched, so a
+    frame nobody looks at closely never pays for a decode.
+    """
 
     ts: datetime
-    mat: Any  # numpy ndarray (BGR) from cv2; typed loosely to keep cv2 optional
+    mat: Any = None  # numpy ndarray (BGR) from cv2; typed loosely to keep cv2 optional
+    jpeg: bytes | None = None
+
+    def decode(self) -> Any:
+        """Pixels, decoding the JPEG once and caching. Call inside a thread."""
+        if self.mat is None:
+            if self.jpeg is None:
+                raise ValueError("frame has neither pixels nor JPEG bytes")
+            import cv2
+            import numpy as np
+
+            self.mat = cv2.imdecode(np.frombuffer(self.jpeg, dtype="uint8"), cv2.IMREAD_COLOR)
+            if self.mat is None:
+                raise ValueError("cv2.imdecode failed for a captured frame")
+        return self.mat
 
 
-def encode_frame(mat: Any) -> tuple[bytes, bytes, int, int]:
-    """(full jpeg, thumb jpeg, width, height). Synchronous — call in a thread."""
+class LiveStream:
+    """Latest-frame fan-out for the MJPEG view (spec.md 2.8).
+
+    Deliberately not the SSE `Broadcaster`: a viewer who cannot keep up wants
+    the newest frame, not the oldest undelivered one, so every subscriber queue
+    holds exactly one frame and publishing overwrites it. A stalled browser tab
+    therefore costs one buffer, not a growing backlog.
+    """
+
+    def __init__(self) -> None:
+        self.latest: bytes | None = None
+        self.latest_ts: datetime | None = None
+        self._subscribers: set[asyncio.Queue[bytes]] = set()
+
+    def subscribe(self) -> asyncio.Queue[bytes]:
+        queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=1)
+        self._subscribers.add(queue)
+        if self.latest is not None:
+            queue.put_nowait(self.latest)
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue[bytes]) -> None:
+        self._subscribers.discard(queue)
+
+    @property
+    def viewer_count(self) -> int:
+        return len(self._subscribers)
+
+    def publish(self, jpeg: bytes, ts: datetime) -> None:
+        self.latest = jpeg
+        self.latest_ts = ts
+        for queue in self._subscribers:
+            with contextlib.suppress(asyncio.QueueEmpty):
+                queue.get_nowait()
+            with contextlib.suppress(asyncio.QueueFull):
+                queue.put_nowait(jpeg)
+
+
+def encode_frame(frame: Frame) -> tuple[bytes, bytes, int, int]:
+    """(full jpeg, thumb jpeg, width, height). Synchronous — call in a thread.
+
+    A frame that arrived as JPEG is stored as the camera encoded it: re-encoding
+    would cost a decode and a generation of quality to produce the same picture.
+    """
     import cv2
 
+    mat = frame.decode()
     height, width = mat.shape[:2]
     params = [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY]
-    ok, full = cv2.imencode(".jpg", mat, params)
-    if not ok:
-        raise RuntimeError("cv2.imencode failed for full frame")
+    if frame.jpeg is not None:
+        full_bytes = frame.jpeg
+    else:
+        ok, full = cv2.imencode(".jpg", mat, params)
+        if not ok:
+            raise RuntimeError("cv2.imencode failed for full frame")
+        full_bytes = full.tobytes()
     thumb_height = max(1, round(height * THUMB_WIDTH / width))
     small = cv2.resize(mat, (THUMB_WIDTH, thumb_height), interpolation=cv2.INTER_AREA)
     ok, thumb = cv2.imencode(".jpg", small, params)
     if not ok:
         raise RuntimeError("cv2.imencode failed for thumbnail")
-    return full.tobytes(), thumb.tobytes(), width, height
+    return full_bytes, thumb.tobytes(), width, height
+
+
+def encode_live(mat: Any) -> bytes:
+    """A JPEG for the live view from raw pixels. Synchronous — call in a thread.
+
+    Only the `cv2.VideoCapture` source needs this: `--camera-cmd` already hands
+    us JPEG, and re-encoding what the camera encoded would be pure waste.
+    """
+    import cv2
+
+    height, width = mat.shape[:2]
+    if width > LIVE_WIDTH:
+        target = (LIVE_WIDTH, max(1, round(height * LIVE_WIDTH / width)))
+        mat = cv2.resize(mat, target, interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", mat, [int(cv2.IMWRITE_JPEG_QUALITY), LIVE_QUALITY])
+    if not ok:
+        raise RuntimeError("cv2.imencode failed for the live frame")
+    return buf.tobytes()
 
 
 def write_frame_files(
@@ -110,7 +202,7 @@ class Store:
 
     async def save_frame(self, frame: Frame) -> FrameRow:
         frame_id = new_id("frm")
-        full, thumb, width, height = await asyncio.to_thread(encode_frame, frame.mat)
+        full, thumb, width, height = await asyncio.to_thread(encode_frame, frame)
         rel_full, rel_thumb = await asyncio.to_thread(
             write_frame_files, self.data_dir, frame_id, full, thumb
         )
@@ -160,6 +252,6 @@ class Store:
                 blob = encode_vec(normalized)
         await self.db.insert_event(event, dim=self.index.dim, blob=blob)
         if normalized is not None and blob is not None:
-            self.index.add(event.id, normalized)
+            self.index.add(event.id, normalized, event.ts)
         self.broadcaster.publish(event.to_json())
         return event
