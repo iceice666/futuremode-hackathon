@@ -19,12 +19,11 @@ from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from starlette.requests import Request
-from starlette.staticfiles import StaticFiles
 
 from . import EMBED_TIMEOUT_MS
-from .api import build_router, install_exception_handlers
+from .api import build_router, error_response, install_exception_handlers
 from .capture import FpsMeter, open_source, require_cv2
 from .config import Config
 from .db import Database
@@ -229,31 +228,31 @@ def create_app(config: Config) -> FastAPI:
 
 def _mount_static(app: FastAPI, static_dir: Path) -> None:
     """Serve `--static-dir` at `/` with SPA fallback; /api/* keeps priority
-    because the API router is registered first (spec.md 2.7)."""
+    because the API router is registered first (spec.md 2.7).
+
+    Deliberately no StaticFiles mount. A mount owns its whole prefix, so it
+    answers its own 404s and never reaches the fallback below -- which is
+    exactly wrong for a SPA, where an unknown path must render index.html.
+    The catch-all already serves every file under static_dir, including
+    `assets/`, so a mount would only add a prefix that behaves differently
+    from the rest of the tree.
+    """
     index_html = static_dir / "index.html"
 
-    if static_dir.is_dir():
-        app.mount("/assets", StaticFiles(directory=static_dir), name="assets")
-
     @app.get("/{path:path}", include_in_schema=False)
+    @app.head("/{path:path}", include_in_schema=False)
     async def spa(path: str, request: Request):
-        if path.startswith("api"):
-            return JSONResponse(
-                status_code=404,
-                content={"error": {"code": "INTERNAL", "message": f"no route /{path}"}},
-            )
-        candidate = (static_dir / path).resolve() if path else index_html
+        if path == "api" or path.startswith("api/"):
+            # Past the API router, so this route does not exist. Segment-exact
+            # so a SPA route like /apiary still falls through to index.html.
+            return error_response("NOT_FOUND", f"no route /{path}")
         root = static_dir.resolve()
+        candidate = (static_dir / path).resolve() if path else index_html
         if path and candidate.is_file() and root in candidate.parents:
             return FileResponse(candidate)
         if index_html.is_file():
             return FileResponse(index_html)
-        return JSONResponse(
-            status_code=404,
-            content={
-                "error": {
-                    "code": "INTERNAL",
-                    "message": f"no static build in {static_dir}; frontend not deployed yet",
-                }
-            },
+        return error_response(
+            "NOT_FOUND",
+            f"no static build in {static_dir}; frontend not deployed yet",
         )
