@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>記憶帳本 · Mneme</title>
+<!--
+  Everything is served from this box. No CDN, no webfont fetch: the demo pulls
+  the network cable to show /api/health flipping `offline` to true, and a page
+  that went blank at that moment would be a poor way to prove it runs offline.
+  React and htm are vendored under web/vendor for the same reason.
+-->
+<style>
+  :root {
+    --bg: #080706;
+    --panel: #0d0c0a;
+    --line: #221f1a;
+    --line-soft: #201d18;
+    --edge: #2b241a;
+    --accent: #e0a33e;
+    --accent-rgb: 224, 163, 62;
+    --ink: #efe6d8;
+    --ink-rgb: 238, 229, 214;
+    --dim: #968e7f;
+    --mono: 'IBM Plex Mono', ui-monospace, 'DejaVu Sans Mono', Menlo, Consolas, monospace;
+    --sans: 'IBM Plex Sans', 'Noto Sans TC', 'Noto Sans CJK TC', system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); font-family: var(--sans); }
+  a { color: var(--accent); text-decoration: none; }
+  input { font-family: inherit; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #2a251c; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  @keyframes hit { 0% { transform: scaleY(1); filter: brightness(1) } 35% { transform: scaleY(1.6); filter: brightness(1.8) } 100% { transform: scaleY(1); filter: brightness(1) } }
+  @keyframes breathe { 0%, 100% { opacity: .35 } 50% { opacity: 1 } }
+  @keyframes sweep { 0% { transform: translateY(-120%) } 100% { transform: translateY(680%) } }
+  @keyframes rise { 0% { opacity: 0; transform: translateY(6px) } 100% { opacity: 1; transform: translateY(0) } }
+  @keyframes tick { 0% { opacity: 0; letter-spacing: .06em } 100% { opacity: 1; letter-spacing: -.01em } }
+  @keyframes glow { 0%, 100% { box-shadow: 0 0 10px rgba(var(--accent-rgb), .45) } 50% { box-shadow: 0 0 20px rgba(var(--accent-rgb), .85) } }
+  @keyframes cut { 0% { opacity: .42 } 70% { opacity: .06 } 100% { opacity: 0 } }
+  @keyframes spin { to { transform: rotate(360deg) } }
+
+  .row:hover { background: rgba(var(--accent-rgb), .07) !important; }
+  .ask:focus { outline: none; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="./vendor/react.production.min.js"></script>
+<script src="./vendor/react-dom.production.min.js"></script>
+<script src="./vendor/htm.umd.js"></script>
+<script src="./app.js"></script>
+</body>
+</html>
