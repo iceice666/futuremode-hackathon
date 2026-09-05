@@ -551,6 +551,19 @@ class Server:
                     "answer": answer,
                     "ms": _ms(started),
                 }
+            if kind == "hello":
+                # What is *actually* loaded, so /api/health can stop reciting
+                # constants. Answered from the backend's own attributes and
+                # touching no model, so it stays cheap and cannot block.
+                return {
+                    "kind": "hello_ok",
+                    "req_id": req_id,
+                    "vlm_model": self.backend.vlm_model,
+                    "llm_model": self.backend.llm_model,
+                    "embed_model": self.backend.embed_model,
+                    "embed_dim": self.backend.embed_dim,
+                    "ms": _ms(started),
+                }
             # sidecar.md 3.1: an unknown kind is a Failed, never a crash.
             return failed(req_id, "UNKNOWN_KIND", f"unsupported kind {kind!r}")
         except SidecarError as exc:

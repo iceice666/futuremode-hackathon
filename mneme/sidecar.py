@@ -31,6 +31,10 @@ widen the stream limit rather than change the protocol (sidecar.md 3.1)."""
 VLM_MODEL = "SmolVLM2-2.2B-Instruct"
 LLM_MODEL = "qwen2.5-7b-instruct-q4"
 EMBED_MODEL = "bge-m3"
+"""Fallback only, for a sidecar too old to answer `hello`. These are what the
+spec's example /api/health shows, not what any given sidecar has loaded, so a
+connected sidecar's own answer always wins — spec.md 2.1 asks health to be
+honest, and on the Orin these three are all wrong."""
 
 REFUSAL = "我沒有看到相關的畫面。"
 """The fixed refusal sentence (spec.md 2.4 / sidecar.md 3.2)."""
@@ -115,6 +119,9 @@ class SocketSidecar:
         self._rpc_lock = asyncio.Lock()
         self._connect_task: asyncio.Task[None] | None = None
         self._closing = False
+        # Filled by the `hello` handshake on connect; empty until then, and
+        # left empty by a sidecar that does not implement it.
+        self._models: dict[str, str] = {}
 
     # -- lifecycle ------------------------------------------------------
 
@@ -124,15 +131,15 @@ class SocketSidecar:
 
     @property
     def vlm_model(self) -> str:
-        return VLM_MODEL
+        return self._models.get("vlm_model", VLM_MODEL)
 
     @property
     def llm_model(self) -> str:
-        return LLM_MODEL
+        return self._models.get("llm_model", LLM_MODEL)
 
     @property
     def embed_model(self) -> str:
-        return EMBED_MODEL
+        return self._models.get("embed_model", EMBED_MODEL)
 
     async def start(self) -> None:
         self._closing = False
@@ -161,7 +168,40 @@ class SocketSidecar:
                 else:
                     self._reader, self._writer = reader, writer
                     log.info("sidecar connected at %s", self.socket_path)
+                    await self._handshake()
             await asyncio.sleep(RECONNECT_INTERVAL_S)
+
+    async def _handshake(self) -> None:
+        """Ask the freshly connected sidecar what it loaded.
+
+        Best effort by design: a sidecar without `hello` replies Failed with
+        UNKNOWN_KIND and keeps the connection (sidecar.md 3.1), so falling back
+        to the constants costs one round trip and never blocks startup. Any
+        failure here must not take the connection down with it — the sidecar
+        can still describe, embed and answer perfectly well.
+        """
+        try:
+            reply = await self._rpc(
+                {"kind": "hello", "req_id": str(ULID())}, self.timeout_s
+            )
+        except Exception as exc:  # noqa: BLE001 - see the docstring
+            # Deliberately broad. This runs inside the reconnect loop, so an
+            # unexpected error here kills that task and the client never
+            # reconnects again -- a total outage traded for a cosmetic field.
+            log.info("sidecar does not report its models (%s); using defaults", exc)
+            return
+        self._models = {
+            key: str(reply[key])
+            for key in ("vlm_model", "llm_model", "embed_model")
+            if isinstance(reply.get(key), str)
+        }
+        if self._models:
+            log.info(
+                "sidecar models: vlm=%s llm=%s embed=%s",
+                self.vlm_model,
+                self.llm_model,
+                self.embed_model,
+            )
 
     async def _drop_connection(self) -> None:
         writer, self._writer, self._reader = self._writer, None, None
