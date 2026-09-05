@@ -242,7 +242,17 @@ class CudaBackend:
     one implementation. Never imported on a Mac — torch is not in that venv.
     """
 
-    def __init__(self, *, vlm: str, llm: str, embed: str, quantize: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        vlm: str,
+        llm: str,
+        embed: str,
+        quantize: bool = False,
+        vlm_url: str | None = None,
+        llm_url: str | None = None,
+        embed_device: str = "cuda",
+    ) -> None:
         import torch
         from transformers import (
             AutoModel,
@@ -256,6 +266,20 @@ class CudaBackend:
         self.vlm_model = vlm
         self.llm_model = llm
         self.embed_model = embed
+        # --vlm-url / --llm-url hand generation to an OpenAI-compatible server
+        # instead of loading the weights here. On the Orin that is the difference
+        # between 105s and ~3s a frame for the same Qwen2.5-VL-3B: bitsandbytes
+        # dequantises NF4 on every forward pass, while vLLM runs fused
+        # awq_marlin kernels. Pointing both at one served VL model also means
+        # only the embedding model stays in this process, which is what makes
+        # the two fit in 15.6GB at all -- a VL model is its text base plus a
+        # vision tower, so it answers as well as the 3B it is built on.
+        self._vlm_url = vlm_url.rstrip("/") if vlm_url else None
+        self._llm_url = llm_url.rstrip("/") if llm_url else None
+        # Every CUDA process pays ~1.5GB for its context before a single weight
+        # lands, so with vLLM resident the embedding model runs on the CPU: it
+        # is called once per event on a short sentence, not once per frame.
+        self._embed_device = embed_device
         dtype = torch.float16
 
         # Jetson Orin has 15.6GB of memory shared between CPU and GPU, so the three
@@ -294,25 +318,40 @@ class CudaBackend:
         # The embedding model stays fp16 even under --quantize: it is only ~2.3GB,
         # so 4-bit saves little, and retrieval quality is what the whole product
         # rests on -- not the place to spend accuracy for memory.
-        log.info("loading embedding model %s (fp16)", embed)
+        log.info("loading embedding model %s on %s (fp16)", embed, self._embed_device)
         self._embed_tok = AutoTokenizer.from_pretrained(embed)
-        self._embed = load(AutoModel, embed, quantized=False)
+        if self._embed_device == "cpu":
+            # fp32 on CPU: ARM has no fast fp16 path, so half precision there
+            # costs speed without buying back useful memory.
+            self._embed = AutoModel.from_pretrained(embed).to("cpu").eval()
+        else:
+            self._embed = load(AutoModel, embed, quantized=False)
         self.embed_dim = int(self._embed.config.hidden_size)
 
-        log.info("loading VLM %s", vlm)
-        self._vlm_processor = AutoProcessor.from_pretrained(vlm)
-        self._vlm = load(AutoModelForImageTextToText, vlm)
+        if self._vlm_url:
+            log.info("VLM served remotely at %s (%s)", self._vlm_url, vlm)
+            self._vlm_processor = None
+            self._vlm = None
+        else:
+            log.info("loading VLM %s", vlm)
+            self._vlm_processor = AutoProcessor.from_pretrained(vlm)
+            self._vlm = load(AutoModelForImageTextToText, vlm)
 
-        log.info("loading LLM %s", llm)
-        self._llm_tok = AutoTokenizer.from_pretrained(llm)
-        self._llm = load(AutoModelForCausalLM, llm)
+        if self._llm_url:
+            log.info("LLM served remotely at %s (%s)", self._llm_url, llm)
+            self._llm_tok = None
+            self._llm = None
+        else:
+            log.info("loading LLM %s", llm)
+            self._llm_tok = AutoTokenizer.from_pretrained(llm)
+            self._llm = load(AutoModelForCausalLM, llm)
         log.info("all models resident")
 
     def embed(self, text: str) -> np.ndarray:
         torch = self._torch
         inputs = self._embed_tok(
             text, return_tensors="pt", truncation=True, max_length=512
-        ).to("cuda")
+        ).to(self._embed_device)
         with torch.inference_mode():
             out = self._embed(**inputs)
         # bge-m3 uses the CLS token as the sentence representation.
@@ -326,7 +365,63 @@ class CudaBackend:
         objects = parse_objects(self._vlm_generate(image_path, OBJECTS_PROMPT, 48))
         return summary, objects
 
+    def _chat_remote(
+        self, base_url: str, model: str, messages: list[dict], max_tokens: int
+    ) -> str:
+        """One turn against an OpenAI-compatible /v1/chat/completions server.
+
+        urllib rather than requests: this already runs on a worker thread, and
+        the sidecar venv should not grow a dependency for one POST. Transport
+        and HTTP errors become SidecarError so the backend sees the documented
+        taxonomy instead of a traceback.
+        """
+        import urllib.error
+        import urllib.request
+
+        body = json.dumps(
+            {
+                "model": model,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": 0.0,
+            }
+        ).encode()
+        request = urllib.request.Request(
+            f"{base_url}/chat/completions",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                payload = json.loads(response.read())
+        except urllib.error.HTTPError as exc:
+            raise SidecarError("REMOTE_FAILED", f"server returned {exc.code}") from exc
+        except OSError as exc:
+            raise SidecarError("REMOTE_FAILED", f"server unreachable: {exc}") from exc
+        return payload["choices"][0]["message"]["content"]
+
     def _vlm_generate(self, image_path: Path, instruction: str, max_tokens: int) -> str:
+        if self._vlm_url:
+            import base64
+
+            b64 = base64.b64encode(image_path.read_bytes()).decode()
+            return self._chat_remote(
+                self._vlm_url,
+                self.vlm_model,
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": instruction},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                            },
+                        ],
+                    }
+                ],
+                max_tokens,
+            )
         torch = self._torch
         messages = [
             {
@@ -352,12 +447,15 @@ class CudaBackend:
     def answer(self, question: str, context: list[str]) -> str:
         if not context:
             return REFUSAL
-        torch = self._torch
         joined = "\n".join(context)
         messages = [
             {"role": "system", "content": ANSWER_SYSTEM},
             {"role": "user", "content": f"觀察記錄:\n{joined}\n\n問題:{question}"},
         ]
+        if self._llm_url:
+            reply = self._chat_remote(self._llm_url, self.llm_model, messages, 160)
+            return one_sentence(reply) or REFUSAL
+        torch = self._torch
         text = self._llm_tok.apply_chat_template(
             messages, add_generation_prompt=True, tokenize=False
         )
@@ -517,6 +615,9 @@ def build_backend(args: argparse.Namespace) -> Backend:
         llm=args.llm or DEFAULT_CUDA_LLM,
         embed=args.embed or DEFAULT_CUDA_EMBED,
         quantize=args.quantize,
+        vlm_url=args.vlm_url,
+        llm_url=args.llm_url,
+        embed_device=args.embed_device,
     )
 
 
@@ -583,6 +684,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--vlm", default=None)
     parser.add_argument("--llm", default=None)
     parser.add_argument("--embed", default=None)
+    parser.add_argument(
+        "--vlm-url",
+        default=None,
+        help="base URL of an OpenAI-compatible server to run describe() on "
+        "(e.g. http://127.0.0.1:8000/v1); --vlm then names the served model",
+    )
+    parser.add_argument(
+        "--llm-url",
+        default=None,
+        help="same for answer(); pointing it at a served VL model reuses one "
+        "engine for both and leaves only the embedder in this process",
+    )
+    parser.add_argument(
+        "--embed-device",
+        choices=("cuda", "cpu"),
+        default="cuda",
+        help="run the embedding model on the CPU to free a whole CUDA context; "
+        "worth it when a served VLM/LLM already holds the GPU",
+    )
     parser.add_argument(
         "--quantize",
         action="store_true",
