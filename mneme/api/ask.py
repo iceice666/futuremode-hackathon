@@ -27,7 +27,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ..db import parse_iso
 from ..search import l2_normalize
@@ -41,9 +41,21 @@ MAX_CITATIONS = 3
 """top_k only widens retrieval; the response is capped at 3 (spec.md 2.4)."""
 
 
+MIN_TOP_K = 1
+MAX_TOP_K = 20
+
+
 class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=500)
-    top_k: int = Field(default=5, ge=1, le=20)
+    top_k: int = 5
+
+    @field_validator("top_k")
+    @classmethod
+    def _clamp_top_k(cls, value: int) -> int:
+        """spec.md 2.4: top_k clamps to 1-20, it does not error. Same shape as
+        the `limit` param in 2.2 -- an out-of-range retrieval width is not
+        something the caller needs to hear about."""
+        return min(max(value, MIN_TOP_K), MAX_TOP_K)
 
 
 def context_line(index: int, ts_iso: str, summary: str) -> str:
