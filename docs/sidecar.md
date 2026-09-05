@@ -1,4 +1,4 @@
-# 離線視覺記憶 — 推論 sidecar 契約 v1.4
+# 離線視覺記憶 — 推論 sidecar 契約 v1.5
 
 VLM / LLM / embedding 三種推論的唯一真相來源。**sidecar 作者只需要看這一份**,不需要讀後端怎麼排程。
 
@@ -8,9 +8,11 @@ VLM / LLM / embedding 三種推論的唯一真相來源。**sidecar 作者只需
 |---|---|
 | [`docs/spec.md`](./spec.md) | §0 全域約定、§2 對外 HTTP API、§5 分工、§6 時間表、§7 風險 |
 | [`docs/backend.md`](./backend.md) | §1 SQLite schema、§3.3 pipeline 形狀、§4 seed、§8 後端實作契約(§8.5 除外) |
-| 本文件 | §3.1 wire protocol、§3.2 prompt 契約、§8.5 mock sidecar |
+| 本文件 | §3.1 wire protocol、§3.2 prompt 契約、§8.5 mock sidecar、§8.9 macOS 驗證 |
 
 **§3.1 的 `kind` 值與欄位名、§3.2 的 system prompt、§8.5 的 mock 行為都算契約**,改動要先在群組講一聲並更新版本號。
+
+**v1.5 改了什麼**:sidecar 從契約變成實作 —— `sidecar/server.py`(`--backend cuda` 給 Orin、`--backend mlx` 給 macOS 驗證)、`sidecar/prompts.py`、`scripts/verify_sidecar.py`(43 條檢查,含真攝影機畫面)。**§3.1 的 wire 與 §3.2 的 prompt 文字一個字都沒動**,新增的只有 §8.9。§8.9 記了三件實測結論,其中「`--ask-min-score 0.35` 對真 bge-m3 不會觸發」會影響現場調參、「鏡頭別對著螢幕」會影響 demo 佈置,務必看一眼。
 
 **v1.4 改了什麼**:後端從 Rust 換成 Python(`backend.md` v1.4),所以本文件把「Rust 端」一律改寫成「後端」,§3.1 的型別宣告從 serde enum 改寫成等價的 Python 定義。**wire 上的 JSON 一個位元都沒變**:`kind` 值、欄位名、型別、`Failed` 語意、逾時、重連間隔全部同 v1.3。sidecar 端不用改任何程式。
 
@@ -132,3 +134,50 @@ class Failed(TypedDict):     # kind: "failed"
 mock 的存在意義是讓 API 層在沒有 Orin 的機器上完整開發與測試。**它不是 demo 路徑**,`mode` / `sidecar` 兩個欄位一定要誠實反映,不准為了畫面好看寫成 `up`。
 
 mock 是後端的 in-process 實作(`mneme/sidecar.py`),真 sidecar 作者不需要實作它 —— 但**行為要對得上**:真 sidecar 換上去之後,`backend.md` §8.8 的驗收清單必須照樣全過,包含最後那條硬性拒答測試。
+
+## 8.9 在 macOS 上驗證真 sidecar
+
+§8.5 最後一句是「真 sidecar 換上去之後 §8.8 必須照樣全過」——但 mock 不開 socket,所以 `--mock-sidecar` 對 §3.1 的 wire protocol **一個字都沒驗到**。以前只有 Orin 能驗,現在 Apple silicon 也可以:`sidecar/server.py --backend mlx` 用 MLX 載同樣那三個模型,協議與 prompt 完全共用同一份實作。
+
+```bash
+python3 -m venv sidecar/.venv
+sidecar/.venv/bin/pip install -r sidecar/requirements-mlx.txt
+
+# 需要 seed 過的資料(§8.8 第一段)
+.venv/bin/python -m mneme.seed --out data/memory.db --data-dir ./data --hours 8 --count 60 --seed 42
+.venv/bin/python scripts/verify_sidecar.py
+```
+
+腳本自己起 sidecar、跑完 **43 條**檢查、全過才 exit 0。涵蓋:§3.1 的 framing / `req_id` 回echo / `vec` 長度與有限性 / `UNKNOWN_KIND` 不崩且連線存活、§3.2 的空 context 拒答句與 grounded 回答、§8.8 的檢索排序與硬性拒答、**攝影機真畫面的 `describe`**,外加 `mneme.sidecar.SocketSidecar` **未修改**就能對接。
+
+### 攝影機那段在驗什麼
+
+seed 圖是純色底加上 `SEED #059` 字樣,所以**一個完全無視像素、每次都吐同一句話的 VLM 也能通過其他所有檢查**。攝影機那段擋掉這種假通過:抓兩張中間隔 2 秒的真畫面(腳本會提示你動一下),要求兩句 summary **必須不同**,並檢查是中文、`objects` 是短標籤、summary 裡沒有 `SEED`。
+
+```bash
+.venv/bin/python scripts/verify_sidecar.py                # 預設就會用攝影機
+.venv/bin/python scripts/verify_sidecar.py --no-camera     # 只跑 33 條協議檢查
+.venv/bin/python scripts/verify_sidecar.py --keep-frames    # 留下畫面自己看
+```
+
+抓完的畫面會刪掉:那兩張是驗證用的暫存,沒有對應的 `events` 列,留在 `data/frames/` 只會變成 `--no-camera` 之後還被 HTTP serve 出去的垃圾。
+
+**沒有攝影機或被 OS 拒絕存取時是 SKIP,不是 FAIL**,並且那 10 條檢查**不會被算成通過**(`--no-camera` 就是剛好 33 條)—— 機器沒鏡頭是環境問題,不該偽裝成契約壞掉,也不該偽裝成契約沒問題。macOS 第一次開鏡頭會跳權限視窗,拒絕後 `isOpened()` 回 `False` 並在 stderr 印 `not authorized to capture video`;`--camera-cmd`(`spec.md` §7)仍然是文件裡的退路。
+
+兩個 venv 是刻意的(`backend.md` §8.2):腳本跑在主程式 venv,sidecar 跑在自己的 venv,torch / MLX 不可能漏進後端環境。
+
+**`--backend mlx` 只是驗證管道,不是 demo 路徑**,demo 一律 Orin 上的 `--backend cuda`。兩個 backend 共用 `Server` 與 §3.2 的 prompt,所以會漂掉的只有模型權重,不會是協議。
+
+### 驗證量到的三件事
+
+**一、`--ask-min-score 0.35` 對真 bge-m3 不會觸發。** 那個預設值是照 mock 的 bag-of-bigrams 調的(無關句子 cosine 落在 0 附近)。真 bge-m3 的中文 cosine 有地板:實測 grounded 問句 `馬克杯放在哪` 拿 0.813,而**沒發生過**的 `有沒有人在跳舞` 拿 0.716 —— 兩者都遠高於 0.35,分離度只有 0.097。
+
+所以 §8.8 那條硬性拒答在真模型上**不是靠分數門檻擋掉的**,是靠 §3.2 的 system prompt。`spec.md` §2.4 已經允許這條路(「LLM 自己也可能判斷 context 不夠而回沒有看到」,`citations` 照實附上),實測 Qwen2.5-7B-4bit 確實回了逐字相符的拒答句。**現場調 `--ask-min-score` 時要拿真資料量過再改**,照 mock 的直覺設值只會讓門檻變裝飾。
+
+**二、sidecar 的 venv 需要 torch,但只用來做前處理。** transformers 5.x 把 SmolVLM 的 image processor 綁在 torch 後面(連 PIL 版都會解析成 dummy),沒有它 `mlx_vlm.load` 直接失敗。推論全程在 MLX/Metal,torch 只負責 image preprocessing —— 這也正是 sidecar 要有自己 venv 的原因。
+
+**三、SmolVLM2-2.2B 的中文句子品質勉強堪用,英文標籤可靠。** 真畫面實測:`objects` 準確(`person` / `curtain` / `wall` / `window`,對得上現場),summary 抓得到主體與動作(「一個男人在一個房間中拉着窗簾,窗簾是紅色的」),但**句子偶爾語法破碎或自我重複**,也會混簡體字。它同時會 OCR 畫面上的文字 —— 拿螢幕截圖測時,`objects` 直接吐出畫面裡的程式碼識別字。
+
+這對 demo 有兩個意涵:**一是鏡頭別對著螢幕**,不然 summary 會變成 OCR 結果;**二是 summary 直接進 `/api/events` 不再加工(§3.2),所以句子品質就是使用者看到的品質**。要更好的中文得換更大的 VLM,那是模型選擇問題,不是協議問題 —— `--vlm` 可以直接換,`Server` 那層不用動。
+
+實測(M5 Pro / 64GB):三個模型載入約 5s,`describe` 約 4.4s、`embed` 約 16ms、`answer` 約 0.3–1.1s,常駐約 9GB。

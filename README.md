@@ -99,6 +99,18 @@ cd bot && python main.py --api http://localhost:8080
 
 `--mock-sidecar` 用 in-process 的確定性假模型取代 CUDA 推論,整條 API 都能跑(規則見 [`docs/sidecar.md` §8.5](./docs/sidecar.md#85-mock-sidecar))。`/api/health` 會誠實回 `sidecar: "mock"`、`mode: "seed-only"`。
 
+### 在 macOS 上驗證真推論
+
+`--mock-sidecar` 驗得到 API 層,但驗不到 sidecar 的 wire protocol(mock 根本不開 socket)。Apple silicon 上可以跑真的:
+
+```bash
+python3 -m venv sidecar/.venv
+sidecar/.venv/bin/pip install -r sidecar/requirements-mlx.txt
+.venv/bin/python scripts/verify_sidecar.py
+```
+
+起一個 `sidecar/server.py --backend mlx`(MLX 版的同樣三個模型),把 [`docs/sidecar.md` §3.1 / §3.2](./docs/sidecar.md#31-wire-protocol) 的每一條與 §8.8 的硬性拒答測完,**並用真的攝影機畫面驗 `describe`**(抓兩張要求 summary 不同,擋掉「無視像素、每次吐同一句」的假通過),全過才 exit 0。沒鏡頭就 `--no-camera` 跑 33 條協議檢查。細節與三則實測結論見 [`docs/sidecar.md` §8.9](./docs/sidecar.md#89-在-macos-上驗證真-sidecar)。
+
 ### 環境變數
 
 全部 CLI flag 與 `MNEME_*` 環境變數見 [`docs/backend.md` §8.3](./docs/backend.md#83-cli-與環境變數) —— 那裡是唯一真相,這裡不重複列表。最常需要現場調的是 `MNEME_DIFF_THRESHOLD`(change filter 閾值,預設 `12.0`)。
