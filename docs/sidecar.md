@@ -1,4 +1,4 @@
-# 離線視覺記憶 — 推論 sidecar 契約 v1.5
+# 離線視覺記憶 — 推論 sidecar 契約 v1.6
 
 VLM / LLM / embedding 三種推論的唯一真相來源。**sidecar 作者只需要看這一份**,不需要讀後端怎麼排程。
 
@@ -11,6 +11,8 @@ VLM / LLM / embedding 三種推論的唯一真相來源。**sidecar 作者只需
 | 本文件 | §3.1 wire protocol、§3.2 prompt 契約、§8.5 mock sidecar、§8.9 macOS 驗證 |
 
 **§3.1 的 `kind` 值與欄位名、§3.2 的 system prompt、§8.5 的 mock 行為都算契約**,改動要先在群組講一聲並更新版本號。
+
+**v1.6 改了什麼**:§8.9 第一則從「實測發現」升級成**已決議** —— 語意拒答的責任正式歸給 §3.2 的 system prompt,`--ask-min-score` 降級成下限護欄(對應 `spec.md` v1.5 §2.4、`backend.md` v1.5 §8.3)。**§3.1 wire、§3.2 prompt 文字、§8.5 mock 行為一個字都沒動。**
 
 **v1.5 改了什麼**:sidecar 從契約變成實作 —— `sidecar/server.py`(`--backend cuda` 給 Orin、`--backend mlx` 給 macOS 驗證)、`sidecar/prompts.py`、`scripts/verify_sidecar.py`(43 條檢查,含真攝影機畫面)。**§3.1 的 wire 與 §3.2 的 prompt 文字一個字都沒動**,新增的只有 §8.9。§8.9 記了三件實測結論,其中「`--ask-min-score 0.35` 對真 bge-m3 不會觸發」會影響現場調參、「鏡頭別對著螢幕」會影響 demo 佈置,務必看一眼。
 
@@ -27,7 +29,7 @@ VLM / LLM / embedding 三種推論的唯一真相來源。**sidecar 作者只需
 | CUDA、模型載入、推論 | **sidecar(Python)** |
 | 取樣、change filter、SQLite、檢索、HTTP、SSE | 後端主程式,見 `backend.md` |
 | 把 `Answer.context` 的時間轉成 `Asia/Taipei` 並排序號 | **後端**,見 §3.2 |
-| 拒答門檻(cosine `< 0.35`)判定 | **後端**,sidecar 不做;見 `spec.md` §2.4 |
+| 語意拒答判定 | **§3.2 的 system prompt**(sidecar 端的 LLM)。後端的 `--ask-min-score` 只是下限護欄,見 `spec.md` §2.4 與 §8.9 第一則 |
 | 向量 L2 normalize | 後端入庫前做(`backend.md` §8.7);sidecar 回原始向量即可 |
 
 三個模型與版本以 `/api/health` 公告的為準(`spec.md` §2.1 範例:VLM `SmolVLM2-2.2B-Instruct`、LLM `qwen2.5-7b-instruct-q4`、embed `bge-m3`、`embed_dim` 1024)。**`Embedded.vec` 的長度必須等於 `--embed-dim`**(預設 1024,真相表在 `backend.md` §8.3),不一致後端會拒絕啟動。
@@ -148,7 +150,7 @@ sidecar/.venv/bin/pip install -r sidecar/requirements-mlx.txt
 .venv/bin/python scripts/verify_sidecar.py
 ```
 
-腳本自己起 sidecar、跑完 **43 條**檢查、全過才 exit 0。涵蓋:§3.1 的 framing / `req_id` 回echo / `vec` 長度與有限性 / `UNKNOWN_KIND` 不崩且連線存活、§3.2 的空 context 拒答句與 grounded 回答、§8.8 的檢索排序與硬性拒答、**攝影機真畫面的 `describe`**,外加 `mneme.sidecar.SocketSidecar` **未修改**就能對接。
+腳本自己起 sidecar、跑完 **43 條**檢查、全過才 exit 0。涵蓋:§3.1 的 framing / `req_id` 回echo / `vec` 長度與有限性 / `UNKNOWN_KIND` 不崩且連線存活、§3.2 的空 context 拒答句與 grounded 回答、§8.8 的檢索排序與硬性拒答、**攝影機真畫面的 `describe`**,外加 `mneme.sidecar.SocketSidecar` **未修改**就能對接。硬性拒答那條**無條件走 §3.2 的 prompt 路徑**(不是看下限護欄有沒有剛好觸發),所以條數固定,不隨門檻值浮動。
 
 ### 攝影機那段在驗什麼
 
@@ -170,9 +172,11 @@ seed 圖是純色底加上 `SEED #059` 字樣,所以**一個完全無視像素�
 
 ### 驗證量到的三件事
 
-**一、`--ask-min-score 0.35` 對真 bge-m3 不會觸發。** 那個預設值是照 mock 的 bag-of-bigrams 調的(無關句子 cosine 落在 0 附近)。真 bge-m3 的中文 cosine 有地板:實測 grounded 問句 `馬克杯放在哪` 拿 0.813,而**沒發生過**的 `有沒有人在跳舞` 拿 0.716 —— 兩者都遠高於 0.35,分離度只有 0.097。
+**一、`--ask-min-score 0.35` 對真 bge-m3 不會觸發,所以拒答責任已改判給 §3.2。** 那個預設值是照 mock 的 bag-of-bigrams 調的(無關句子 cosine 落在 0 附近)。真 bge-m3 的中文 cosine 有地板:實測 grounded 問句 `馬克杯放在哪` 拿 0.813,而**沒發生過**的 `有沒有人在跳舞` 拿 0.716 —— 兩者都遠高於 0.35,分離度只有 0.097。
 
-所以 §8.8 那條硬性拒答在真模型上**不是靠分數門檻擋掉的**,是靠 §3.2 的 system prompt。`spec.md` §2.4 已經允許這條路(「LLM 自己也可能判斷 context 不夠而回沒有看到」,`citations` 照實附上),實測 Qwen2.5-7B-4bit 確實回了逐字相符的拒答句。**現場調 `--ask-min-score` 時要拿真資料量過再改**,照 mock 的直覺設值只會讓門檻變裝飾。
+**這不是待辦,是已經下的決定:不去調那個數字。** 0.097 的分離度撐不起單一門檻 —— 設 0.75 會把 0.716 擋掉但也開始誤拒 grounded 問句,而且門檻值會隨資料集、語言、鏡頭場景漂移,現場沒有時間重新量。所以 `spec.md` v1.5 §2.4 把語意拒答正式歸給 §3.2 的 system prompt,`--ask-min-score` 保留 `0.35` 當**下限護欄**:擋空庫、壞向量、以及 mock 那種無關句 cosine 近 0 的情形,真模型上幾乎不觸發。
+
+實測 Qwen2.5-7B-4bit 對「沒發生過」的問題回了逐字相符的拒答句,而 `citations` 照實附上檢索到的事件 —— 這是常態路徑,不是退化。**驗收條件因此看 `answer` 而不看 `citations` 是否為 `[]`**(`backend.md` §8.8)。真要改門檻必須拿真資料重新量過,照 mock 的直覺設值只會讓它變裝飾。
 
 **二、sidecar 的 venv 需要 torch,但只用來做前處理。** transformers 5.x 把 SmolVLM 的 image processor 綁在 torch 後面(連 PIL 版都會解析成 dummy),沒有它 `mlx_vlm.load` 直接失敗。推論全程在 MLX/Metal,torch 只負責 image preprocessing —— 這也正是 sidecar 要有自己 venv 的原因。
 

@@ -1,12 +1,14 @@
-# 離線視覺記憶 — 後端契約 v1.4
+# 離線視覺記憶 — 後端契約 v1.5
 
 Python 後端(iceice666 / 後端 agent)的實作真相來源。對外承諾在 [`docs/spec.md`](./spec.md),推論契約在 [`docs/sidecar.md`](./sidecar.md)。**三份文件的節號連續、不重複**:
 
 - `spec.md` §0 全域約定、§2 對外 HTTP API、§5 分工、§6 時間表、§7 風險
 - 本文件 §1 SQLite schema、§3.3 pipeline 形狀、§4 假資料 seed、§8 後端實作契約(§8.5 除外)
-- `sidecar.md` §3.1 wire protocol、§3.2 prompt 契約、§8.5 mock sidecar
+- `sidecar.md` §3.1 wire protocol、§3.2 prompt 契約、§8.5 mock sidecar、§8.9 macOS 驗證
 
 改動這裡的任何一節要先在群組講一聲並更新版本號。§1 的 schema、§8.2 的選型都算契約。
+
+**v1.5 改了什麼**:配合 `spec.md` v1.5 把 §8.3 的 `--ask-min-score` 重新定義成**下限護欄**(語意拒答歸 `sidecar.md` §3.2 的 prompt),並修正 §8.8 硬性拒答那條的驗收條件 —— 看 `answer`,不看 `citations` 是否為 `[]`。**預設值仍是 `0.35`,flag / env 名稱沒動**,§1 schema 與 §8.2 選型零變更
 
 **v1.4 改了什麼**:後端實作語言從 Rust 換成 Python(asyncio + FastAPI),§3.3 / §8.1 / §8.2 / §8.4 / §8.6 / §8.7 / §8.8 照新選型重寫,§4 的 seed 換成 `python -m mneme.seed`。**對外沒有 breaking change**:`spec.md` §2 的 JSON、§1 的 schema、§8.3 的 flag / env 名稱與預設值全部原封不動。sidecar 那邊也沒動 —— unix socket 上的 wire protocol 跟 v1.3 完全一樣,只是另一端從 Rust 換成 Python。
 
@@ -216,7 +218,7 @@ python -m venv --system-site-packages .venv && .venv/bin/pip install -e .
 | `--capture-fps` | `MNEME_CAPTURE_FPS` | `2` | |
 | `--diff-threshold` | `MNEME_DIFF_THRESHOLD` | `12.0` | 64×64 灰階 mean absolute diff,0–255 尺度。現場光線不同務必調 |
 | `--cooldown-ms` | `MNEME_COOLDOWN_MS` | `4000` | 觸發後的冷卻時間 |
-| `--ask-min-score` | `MNEME_ASK_MIN_SCORE` | `0.35` | 低於此分視為「沒看到」,spec.md §2.4 |
+| `--ask-min-score` | `MNEME_ASK_MIN_SCORE` | `0.35` | **下限護欄,不是語意判定**:低於此分不呼叫 LLM 直接回拒答句 + `citations: []`。真模型上幾乎不觸發,語意拒答走 `sidecar.md` §3.2 的 prompt。要改必須拿真資料量過,見 `sidecar.md` §8.9 與 spec.md §2.4 |
 | `--embed-dim` | `MNEME_EMBED_DIM` | `1024` | 必須跟 sidecar 的模型一致,啟動時對 `meta.embed_dim` 檢查 |
 | `--sidecar-timeout-ms` | `MNEME_SIDECAR_TIMEOUT_MS` | `20000` | `Describe` / `Answer` 用;`Embed` 用 `5000` |
 
@@ -284,7 +286,7 @@ curl -sI localhost:8080/api/frames/<frame_id>/thumb
 curl -s -XPOST localhost:8080/api/ask -H 'content-type: application/json' \
      -d '{"question":"馬克杯放在哪"}' | jq
 
-# answer 明講沒看到,citations 為 []  ← 硬性驗收
+# answer 明講沒看到 ← 硬性驗收。citations 可能非空(真模型走 prompt 拒答),不要拿 [] 當條件
 curl -s -XPOST localhost:8080/api/ask -H 'content-type: application/json' \
      -d '{"question":"有沒有人在跳舞"}' | jq
 
@@ -295,4 +297,4 @@ curl -N localhost:8080/api/stream
 .venv/bin/python -m mneme.seed --out /tmp/again.db --data-dir /tmp/again --hours 8 --count 60 --seed 42
 ```
 
-最後兩條是硬性驗收:拒答測試過不了不算做完(spec.md §2.4);seed 不可重現的話三個人會對不同資料 debug,`--seed` 就白寫了。
+最後兩條是硬性驗收:拒答測試過不了不算做完(spec.md §2.4 —— 看的是 `answer` 有沒有明講沒看到,**不是 `citations` 是不是 `[]`**);seed 不可重現的話三個人會對不同資料 debug,`--seed` 就白寫了。

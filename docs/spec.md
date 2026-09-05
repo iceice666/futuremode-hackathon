@@ -1,4 +1,4 @@
-# 離線視覺記憶 — 介面契約 v1.4
+# 離線視覺記憶 — 介面契約 v1.5
 
 三人平行開工用。**對外介面的唯一真相來源是這一份**,改動要先在群組講一聲並更新版本號。
 
@@ -13,6 +13,8 @@
 | [`docs/sidecar.md`](./sidecar.md) | §3.1 wire protocol、§3.2 prompt 契約、§8.5 mock sidecar | 寫 VLM / LLM / embedding 推論的人 |
 
 節號在三份文件之間連續、不重複,所以既有的 `§2.6` `§8.3` 這類引用不會歧義。跨檔引用一律寫成 `backend.md §8.3` / `sidecar.md §3.2`。
+
+**v1.5 改了什麼**(v1.4 → v1.5):**§2.4 的拒答規則改寫** —— 實測真 bge-m3 的中文 cosine 有地板,單一分數門檻分不開「有發生」與「沒發生」(`sidecar.md` §8.9 第一則),所以語意拒答的責任正式歸給 `sidecar.md` §3.2 的 system prompt,`--ask-min-score` 降級成下限護欄。**JSON shape 一個欄位都沒動**,變的是可達組合:`answer` 是拒答句時 `citations` 可能非空。§2.6 錯誤 code、分頁語意、其他 endpoint 零變更
 
 **v1.4 改了什麼**(v1.3 → v1.4):後端實作語言從 Rust 換成 Python(asyncio + FastAPI),細節全在 `backend.md` v1.4。**這份文件的對外契約零變更** —— §0、§2 的 JSON、欄位、分頁語意、錯誤 code、拒答門檻全部原樣;只把 §2.7 / §3 / §5 / §7 / §8 裡「Rust」這個字換成「後端」,並把 §7 的 `nokhwa` 那條退路改成 cv2 的版本
 
@@ -166,15 +168,16 @@ LINE bot 和 web 都打這支,行為完全一致。
 
 - `question` 送 sidecar `Embed` 拿向量,對全庫 embeddings 算 cosine,取前 `top_k`(實作見 backend.md §8.7)
 - `score` 就是**原始 cosine**,範圍 `[-1, 1]`,不正規化、不 rescale、不轉百分比。前端要顯示百分比自己換
-- **拒答門檻:最高分 `< 0.35` 就判定沒看到** —— 不呼叫 LLM,`answer` 固定回 `"我沒有看到相關的畫面。"`,`citations` 給 `[]`。門檻走 `--ask-min-score`,現場光線/資料不同要調
+- **拒答有兩條路,prompt 那條才是主要的。** 真 bge-m3 的中文 cosine 有地板 —— 實測 grounded 問句 `馬克杯放在哪` 拿 0.813,**沒發生過**的 `有沒有人在跳舞` 拿 0.716,分離度只有 0.097(`sidecar.md` §8.9)。**單一 cosine 門檻分不開這兩者**,所以語意拒答由 `sidecar.md` §3.2 的 system prompt 負責:LLM 判斷 context 不足就回固定句 `"我沒有看到相關的畫面。"`,而 `citations` **仍照實附上檢索到的事件** —— 讓評審看得到我們檢索到什麼,只是不硬掰
+- **`--ask-min-score` 是下限護欄,不是語意判定。** 最高分 `< 門檻`(預設 `0.35`)才走這條:不呼叫 LLM,`answer` 固定回同一句拒答句,`citations` 給 `[]`。它擋的是空庫、壞向量、以及 mock sidecar 那種無關句 cosine 落在 0 附近的情形。**真模型上幾乎不會觸發,不要靠它拒答**;要改門檻必須拿真資料量過(`sidecar.md` §8.9),照 mock 的直覺設值只會讓它變裝飾
 - 過門檻:只把 `score >= 門檻` 的送進 prompt,最多 3 筆。`top_k` 只影響檢索寬度,**不影響回傳筆數**
 - `citations` 依 `score` 由高到低,最多 3 筆
-- LLM 自己也可能判斷 context 不夠而回「沒有看到」(prompt 有明確指示,見 sidecar.md §3.2)。這種情況 `citations` **仍照實附上檢索到的事件** —— 讓評審看得到我們檢索到什麼,只是不硬掰
+- 所以 `answer` 是拒答句時,`citations` **可能非空**(prompt 路徑,常態)也**可能是 `[]`**(護欄路徑)。前端兩種都要能顯示,不要假設拒答就沒有引用
 - 每次呼叫都寫一筆 `queries`,成功失敗都寫,`latency_ms` 一起存
 - `latency_ms` = 收到 request 到組完 response,含 embed + LLM
 - sidecar 沒連上回 503 `SIDECAR_UNAVAILABLE`;超時回 504 `SIDECAR_TIMEOUT`
 
-**不准硬掰**,評審一定會問一個沒發生過的事情。backend.md §8.8 的最後一條 curl 就是在測這個,過不了不算做完。
+**不准硬掰**,評審一定會問一個沒發生過的事情。backend.md §8.8 的最後一條 curl 就是在測這個:驗收條件是 `answer` 明講沒看到,**不是 `citations` 為 `[]`** —— 真模型上拒答會帶著引用回來。過不了不算做完。
 
 ### 2.5 `GET /api/stream`(SSE)
 
