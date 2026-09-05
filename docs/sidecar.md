@@ -74,6 +74,7 @@ class Failed(TypedDict):     # kind: "failed"
 連線與併發約定:
 
 - 後端只開**一條** socket 連線,而且**同時只有一個 in-flight 請求**。`req_id` 純粹用來對帳和 log 追蹤,不是為了多工 —— sidecar 端不需要做併發
+- 一個 `/api/ask` 會**連續佔用** sidecar 跑完 `embed` + `answer` 才放手,capture pipeline 的 `describe` 插不進中間。**協議沒變** —— 還是一條連線、同時一個 in-flight 請求,sidecar 端看不出差別。理由是量出來的:兩個 RPC 各搶一次鎖時,pipeline 會在縫隙塞一個約 800ms 的 `describe`,實測讓 ask 的 `embed` 等了 +708ms;改成一次佔用後,滿載 pipeline 下的 ask 從 2.36s 降到 1.64s(純推論地板是 1.56s),而 pipeline 吞吐不變(1.15 events/s)。**互動優先權沒用、preempt 更糟**:pipeline 同時只有一個 RPC 在飛,ask 等的是「正在跑」那個,GPU 跑到一半沒辦法倒帶 —— 實測插隊只買到 1ms,砍掉進行中的 `describe` 反而讓 ask 慢到 2.37s 又白丟 7 張畫面
 - 每行一個 JSON,`\n` 結尾。字串裡不得有裸換行:一律 `json.dumps(obj, ensure_ascii=False) + "\n"`,別自己拼字串。**`json.dumps` 預設就會轉義控制字元**,中文靠 `ensure_ascii=False` 保持可讀(要用 ASCII escape 也合法,兩邊都解得開)
 - 讀取用 `await reader.readline()`,不要 `read(n)` 自己切。`Embedded.vec` 1024 維實測一行約 22KB(實測值,見下方 json 範例的同款 dumps),還在 asyncio 預設 64KB limit 內,但換更大的 embedding 模型就會撞到 —— 那時要調 `open_unix_connection(limit=...)`,不是改協議
 - 收到不認識的 `kind` 回 `{"kind":"failed","code":"UNKNOWN_KIND",...}`,不要直接崩

@@ -9,9 +9,12 @@ correlation, not multiplexing.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import hashlib
 import json
 import logging
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -31,6 +34,16 @@ EMBED_MODEL = "bge-m3"
 
 REFUSAL = "我沒有看到相關的畫面。"
 """The fixed refusal sentence (spec.md 2.4 / sidecar.md 3.2)."""
+
+_IN_SESSION: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "sidecar_session", default=False
+)
+"""Set while `Sidecar.session()` holds the RPC lock for the current task.
+
+A ContextVar, not an attribute: each request runs in its own asyncio task and
+therefore its own context copy, so one handler's session can never be mistaken
+for another's.
+"""
 
 
 class SidecarUnavailable(RuntimeError):
@@ -72,6 +85,9 @@ class Sidecar(Protocol):
     async def embed(self, text: str) -> np.ndarray: ...
 
     async def answer(self, question: str, context: list[str]) -> str: ...
+
+    def session(self) -> contextlib.AbstractAsyncContextManager[Sidecar]:
+        """Reserve the sidecar for one logical request's whole RPC sequence."""
 
     async def start(self) -> None: ...
 
@@ -159,49 +175,34 @@ class SocketSidecar:
 
     # -- rpc ------------------------------------------------------------
 
-    async def _rpc(self, payload: dict[str, Any], timeout_s: float) -> dict[str, Any]:
+    @contextlib.asynccontextmanager
+    async def session(self) -> AsyncIterator[SocketSidecar]:
+        """Hold the RPC lock across every call made inside the block.
+
+        /api/ask issues two RPCs (embed, then answer). Acquiring the lock
+        separately for each lets the capture pipeline slip a ~800ms describe
+        into the gap, which measured as +708ms on the ask's embed wait. Taking
+        the lock once removes that interleaving: ask latency under a saturated
+        pipeline went 2.36s -> 1.64s, against a 1.56s floor of pure inference,
+        with pipeline throughput unchanged at 1.15 events/s.
+
+        Still exactly one in-flight request, so the wire protocol in
+        sidecar.md 3.1 is unchanged; the sidecar cannot tell the difference.
+        """
         async with self._rpc_lock:
-            reader, writer = self._reader, self._writer
-            if reader is None or writer is None:
-                raise SidecarUnavailable(f"sidecar not connected at {self.socket_path}")
-            line = json.dumps(payload, ensure_ascii=False) + "\n"
+            token = _IN_SESSION.set(True)
             try:
-                writer.write(line.encode("utf-8"))
-                await writer.drain()
-                raw = await asyncio.wait_for(reader.readline(), timeout=timeout_s)
-            except asyncio.TimeoutError as exc:
-                # A hung sidecar poisons the stream framing: drop the socket
-                # so the next request starts from a clean connection.
-                await self._drop_connection()
-                raise SidecarTimeout(f"sidecar timed out after {timeout_s:.1f}s") from exc
-            except (OSError, ConnectionError) as exc:
-                await self._drop_connection()
-                raise SidecarUnavailable(f"sidecar connection lost: {exc}") from exc
-            except ValueError as exc:
-                # readline() raises ValueError when READ_LIMIT is reached
-                # before a newline. The unread tail of that reply is still
-                # queued, so every later read would resync mid-line: the
-                # framing is poisoned and the socket has to go.
-                await self._drop_connection()
-                raise SidecarFailed(
-                    "OVERSIZED_REPLY",
-                    f"reply exceeded the {READ_LIMIT} byte line limit: {exc}",
-                ) from exc
-            if not raw:
-                await self._drop_connection()
-                raise SidecarUnavailable("sidecar closed the connection")
-            try:
-                reply = json.loads(raw)
-            except json.JSONDecodeError as exc:
-                await self._drop_connection()
-                raise SidecarFailed("BAD_JSON", f"unparseable reply: {exc}") from exc
-            if not isinstance(reply, dict):
-                # Valid JSON but not an object: every check below is a
-                # `.get`, so this would surface as AttributeError -> 500.
-                # The line was framed correctly, so the connection survives.
-                raise SidecarFailed(
-                    "BAD_REPLY", f"expected a JSON object, got {type(reply).__name__}"
-                )
+                yield self
+            finally:
+                _IN_SESSION.reset(token)
+
+    async def _rpc(self, payload: dict[str, Any], timeout_s: float) -> dict[str, Any]:
+        if _IN_SESSION.get():
+            # `session()` already holds the lock for this whole exchange.
+            reply = await self._exchange(payload, timeout_s)
+        else:
+            async with self._rpc_lock:
+                reply = await self._exchange(payload, timeout_s)
         if reply.get("kind") == "failed":
             raise SidecarFailed(
                 str(reply.get("code", "UNKNOWN")), str(reply.get("message", ""))
@@ -209,6 +210,51 @@ class SocketSidecar:
         if reply.get("req_id") != payload["req_id"]:
             raise SidecarFailed(
                 "REQ_ID_MISMATCH", f"expected {payload['req_id']}, got {reply.get('req_id')}"
+            )
+        return reply
+
+    async def _exchange(self, payload: dict[str, Any], timeout_s: float) -> dict[str, Any]:
+        """One request/response on the wire. The caller owns the lock."""
+        reader, writer = self._reader, self._writer
+        if reader is None or writer is None:
+            raise SidecarUnavailable(f"sidecar not connected at {self.socket_path}")
+        line = json.dumps(payload, ensure_ascii=False) + "\n"
+        try:
+            writer.write(line.encode("utf-8"))
+            await writer.drain()
+            raw = await asyncio.wait_for(reader.readline(), timeout=timeout_s)
+        except asyncio.TimeoutError as exc:
+            # A hung sidecar poisons the stream framing: drop the socket
+            # so the next request starts from a clean connection.
+            await self._drop_connection()
+            raise SidecarTimeout(f"sidecar timed out after {timeout_s:.1f}s") from exc
+        except (OSError, ConnectionError) as exc:
+            await self._drop_connection()
+            raise SidecarUnavailable(f"sidecar connection lost: {exc}") from exc
+        except ValueError as exc:
+            # readline() raises ValueError when READ_LIMIT is reached
+            # before a newline. The unread tail of that reply is still
+            # queued, so every later read would resync mid-line: the
+            # framing is poisoned and the socket has to go.
+            await self._drop_connection()
+            raise SidecarFailed(
+                "OVERSIZED_REPLY",
+                f"reply exceeded the {READ_LIMIT} byte line limit: {exc}",
+            ) from exc
+        if not raw:
+            await self._drop_connection()
+            raise SidecarUnavailable("sidecar closed the connection")
+        try:
+            reply = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            await self._drop_connection()
+            raise SidecarFailed("BAD_JSON", f"unparseable reply: {exc}") from exc
+        if not isinstance(reply, dict):
+            # Valid JSON but not an object: every check in _rpc is a `.get`,
+            # so this would surface as AttributeError -> 500. The line was
+            # framed correctly, so the connection survives.
+            raise SidecarFailed(
+                "BAD_REPLY", f"expected a JSON object, got {type(reply).__name__}"
             )
         return reply
 
@@ -367,6 +413,12 @@ class MockSidecar:
 
     async def stop(self) -> None:
         return None
+
+    @contextlib.asynccontextmanager
+    async def session(self) -> AsyncIterator[MockSidecar]:
+        """Nothing to reserve: the mock runs in-process with no shared socket,
+        so there is no lock a pipeline call could contend for."""
+        yield self
 
     async def describe(self, image_path: str) -> tuple[str, list[str]]:
         index = await asyncio.to_thread(_mock_sentence_index, image_path, self.data_dir)

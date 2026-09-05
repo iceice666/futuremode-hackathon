@@ -53,19 +53,36 @@ async def ask(request: Request, body: AskRequest) -> dict[str, Any]:
     if not question:
         raise ApiError("INVALID_PARAM", "question must not be blank")
 
+    if not runtime.index.count:
+        # Nothing indexed: refuse without reserving the sidecar at all, so an
+        # empty database never queues behind a capture-pipeline describe.
+        return await _respond(runtime, question, REFUSAL, [], started)
+
+    # embed + answer as one reservation, so the pipeline cannot interleave a
+    # describe between them (see SocketSidecar.session).
+    async with runtime.sidecar.session():
+        answer, citations = await _retrieve(runtime, question, body.top_k, started)
+    # The `queries` row is written outside the session: it is our own DB, and
+    # holding the sidecar while we touch it would stall the pipeline for no
+    # reason.
+    return await _respond(runtime, question, answer, citations, started)
+
+
+async def _retrieve(
+    runtime, question: str, top_k: int, started: float
+) -> tuple[str, list[dict[str, Any]]]:
+    """Embed, search, and answer. Called with the sidecar already reserved."""
     threshold = runtime.config.ask_min_score
-    hits: list[tuple[str, float]] = []
-    if runtime.index.count:
-        vec = await _guarded(runtime, question, started, runtime.sidecar.embed(question))
-        try:
-            query = l2_normalize(vec)
-        except ValueError as exc:
-            raise ApiError("INTERNAL", f"embedding for the question is unusable: {exc}") from exc
-        hits = runtime.index.search(query, body.top_k)
+    vec = await _guarded(runtime, question, started, runtime.sidecar.embed(question))
+    try:
+        query = l2_normalize(vec)
+    except ValueError as exc:
+        raise ApiError("INTERNAL", f"embedding for the question is unusable: {exc}") from exc
+    hits = runtime.index.search(query, top_k)
 
     if not hits or hits[0][1] < threshold:
         # Below threshold: refuse without calling the LLM at all.
-        return await _respond(runtime, question, REFUSAL, [], started)
+        return REFUSAL, []
 
     kept = [(eid, score) for eid, score in hits if score >= threshold][:MAX_CITATIONS]
     rows = await runtime.db.events_by_ids([eid for eid, _ in kept])
@@ -89,7 +106,7 @@ async def ask(request: Request, body: AskRequest) -> dict[str, Any]:
     answer = await _guarded(
         runtime, question, started, runtime.sidecar.answer(question, context)
     )
-    return await _respond(runtime, question, answer, citations, started)
+    return answer, citations
 
 
 async def _record(
