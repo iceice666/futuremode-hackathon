@@ -79,7 +79,14 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--cooldown-ms", type=int, default=int(env("MNEME_COOLDOWN_MS", "4000")))
     parser.add_argument(
-        "--ask-min-score", type=float, default=float(env("MNEME_ASK_MIN_SCORE", "0.35"))
+        "--ask-min-score",
+        type=float,
+        default=float(env("MNEME_ASK_MIN_SCORE", "0.35")),
+        help=(
+            "floor guard for /api/ask, not a semantic judge: below this cosine we "
+            "refuse without calling the LLM. Semantic refusal belongs to the "
+            "sidecar.md 3.2 prompt; on real bge-m3 this rarely fires (sidecar.md 8.9)"
+        ),
     )
     parser.add_argument("--embed-dim", type=int, default=int(env("MNEME_EMBED_DIM", "1024")))
     parser.add_argument(

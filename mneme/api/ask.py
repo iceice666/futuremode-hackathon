@@ -1,12 +1,23 @@
 """POST /api/ask — spec.md 2.4. The whole retrieval + refusal behaviour.
 
-Flow: embed the question, cosine over the whole index, take top_k. If the best
-score is below `--ask-min-score` we refuse *without* calling the LLM. Otherwise
-we build the numbered Taipei-time context (sidecar.md 3.2) from at most three
-above-threshold hits and hand it to the LLM verbatim.
+Flow: embed the question, cosine over the whole index, take top_k, build the
+numbered Taipei-time context (sidecar.md 3.2) from at most three hits and hand
+it to the LLM verbatim.
 
-Never fabricate: the LLM may also decide the context is insufficient and refuse
-on its own, and in that case the citations are still returned as retrieved.
+Refusal has two paths and they are not interchangeable:
+
+- `--ask-min-score` is a *floor guard*. Below it we refuse without calling the
+  LLM and return no citations. It catches an empty index, a broken vector, and
+  the mock sidecar's near-zero cosine for unrelated text. On real bge-m3 it
+  practically never fires: Chinese cosine has a floor around 0.7 and the
+  separation between witnessed and unwitnessed is ~0.1 (sidecar.md 8.9).
+- Semantic refusal is the LLM's job, per the sidecar.md 3.2 system prompt. That
+  is the normal path on real models, and there the citations are still returned
+  as retrieved — the judges get to see what we found, we just do not make
+  anything up.
+
+So a refusal answer may come back with a non-empty `citations`. That is the
+contract, not a bug: never key any logic off `citations == []`.
 """
 
 from __future__ import annotations
@@ -81,7 +92,9 @@ async def _retrieve(
     hits = runtime.index.search(query, top_k)
 
     if not hits or hits[0][1] < threshold:
-        # Below threshold: refuse without calling the LLM at all.
+        # Floor guard only (see module docstring): nothing retrievable is even
+        # close, so refuse without spending an LLM call. Semantic refusal is
+        # the prompt's job and happens further down, with citations attached.
         return REFUSAL, []
 
     kept = [(eid, score) for eid, score in hits if score >= threshold][:MAX_CITATIONS]
