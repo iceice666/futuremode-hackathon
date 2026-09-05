@@ -242,7 +242,7 @@ class CudaBackend:
     one implementation. Never imported on a Mac — torch is not in that venv.
     """
 
-    def __init__(self, *, vlm: str, llm: str, embed: str) -> None:
+    def __init__(self, *, vlm: str, llm: str, embed: str, quantize: bool = False) -> None:
         import torch
         from transformers import (
             AutoModel,
@@ -258,20 +258,54 @@ class CudaBackend:
         self.embed_model = embed
         dtype = torch.float16
 
-        log.info("loading embedding model %s", embed)
+        # Jetson Orin has 15.6GB of memory shared between CPU and GPU, so the three
+        # fp16 models (~21.6GB together) do not fit. NF4 brings that to roughly a
+        # third. bitsandbytes must be one built for sm_87 -- the PyPI aarch64 wheel
+        # ships kernels for datacenter ARM only and dies with "named symbol not
+        # found" here.
+        quant_config = None
+        if quantize:
+            from transformers import BitsAndBytesConfig
+
+            quant_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=dtype,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+            )
+
+        # transformers renamed torch_dtype -> dtype in v5. The Orin is pinned to
+        # 4.51 because v5 rejects JetPack's torch 2.5, so ask this install which
+        # spelling it takes rather than hardcoding one and breaking the other.
+        import transformers
+
+        dtype_kw = "dtype" if int(transformers.__version__.split(".")[0]) >= 5 else "torch_dtype"
+
+        def load(factory, name: str, *, quantized: bool = True):
+            """A 4-bit model is placed by device_map during construction; calling
+            .to() on it afterwards is an error, hence the two paths."""
+            kwargs: dict[str, Any] = {dtype_kw: dtype}
+            if quant_config is None or not quantized:
+                return factory.from_pretrained(name, **kwargs).to("cuda").eval()
+            return factory.from_pretrained(
+                name, quantization_config=quant_config, device_map="cuda", **kwargs
+            ).eval()
+
+        # The embedding model stays fp16 even under --quantize: it is only ~2.3GB,
+        # so 4-bit saves little, and retrieval quality is what the whole product
+        # rests on -- not the place to spend accuracy for memory.
+        log.info("loading embedding model %s (fp16)", embed)
         self._embed_tok = AutoTokenizer.from_pretrained(embed)
-        self._embed = AutoModel.from_pretrained(embed, dtype=dtype).to("cuda").eval()
+        self._embed = load(AutoModel, embed, quantized=False)
         self.embed_dim = int(self._embed.config.hidden_size)
 
         log.info("loading VLM %s", vlm)
         self._vlm_processor = AutoProcessor.from_pretrained(vlm)
-        self._vlm = (
-            AutoModelForImageTextToText.from_pretrained(vlm, dtype=dtype).to("cuda").eval()
-        )
+        self._vlm = load(AutoModelForImageTextToText, vlm)
 
         log.info("loading LLM %s", llm)
         self._llm_tok = AutoTokenizer.from_pretrained(llm)
-        self._llm = AutoModelForCausalLM.from_pretrained(llm, dtype=dtype).to("cuda").eval()
+        self._llm = load(AutoModelForCausalLM, llm)
         log.info("all models resident")
 
     def embed(self, text: str) -> np.ndarray:
@@ -482,6 +516,7 @@ def build_backend(args: argparse.Namespace) -> Backend:
         vlm=args.vlm or DEFAULT_CUDA_VLM,
         llm=args.llm or DEFAULT_CUDA_LLM,
         embed=args.embed or DEFAULT_CUDA_EMBED,
+        quantize=args.quantize,
     )
 
 
@@ -548,6 +583,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--vlm", default=None)
     parser.add_argument("--llm", default=None)
     parser.add_argument("--embed", default=None)
+    parser.add_argument(
+        "--quantize",
+        action="store_true",
+        help="load the cuda backend's models in 4-bit NF4; required on Jetson Orin, "
+        "where the fp16 models do not fit in 15.6GB of shared memory",
+    )
     parser.add_argument(
         "--embed-dim",
         type=int,

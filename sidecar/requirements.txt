@@ -7,10 +7,18 @@
 #     the PyPI arm64 wheels have no CUDA support. Install those first, from
 #     https://developer.download.nvidia.com/compute/redist/jp/, then this file.
 #
+#     --quantize additionally needs bitsandbytes built for the Orin's sm_87.
+#     The PyPI aarch64 wheel targets datacenter ARM and dies at run time with
+#     "named symbol not found", so take it from the Jetson index instead:
+#       pip install --index-url https://pypi.jetson-ai-lab.io/jp6/cu126 bitsandbytes
+#
 #   macOS / Apple silicon (--backend mlx), the verification path:
 #     python -m venv .venv && .venv/bin/pip install -r requirements-mlx.txt
 
-transformers>=4.45
+# <5 on Jetson: transformers 5 refuses JetPack's torch 2.5 ("PyTorch was not
+# found"), and renamed from_pretrained's torch_dtype to dtype.
+transformers>=4.45,<5
 accelerate>=0.34
 pillow>=10.3
 numpy>=1.26
+num2words>=0.5  # SmolVLM's processor imports it unconditionally

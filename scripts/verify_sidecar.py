@@ -42,7 +42,10 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Self
+try:  # Self landed in 3.11; JetPack 6.2 ships Python 3.10
+    from typing import Self
+except ImportError:
+    from typing_extensions import Self
 
 import numpy as np
 
@@ -101,10 +104,21 @@ class SidecarProcess:
     EOF instead of a hang.
     """
 
-    def __init__(self, socket_path: Path, data_dir: Path, python: Path) -> None:
+    def __init__(
+        self,
+        socket_path: Path,
+        data_dir: Path,
+        python: Path,
+        backend: str = "mlx",
+        quantize: bool = False,
+        models: dict[str, str | None] | None = None,
+    ) -> None:
         self.socket_path = socket_path
         self.data_dir = data_dir
         self.python = python
+        self.backend = backend
+        self.quantize = quantize
+        self.models = models or {}
         self.proc: asyncio.subprocess.Process | None = None
 
     async def start(self) -> None:
@@ -114,7 +128,7 @@ class SidecarProcess:
             str(self.python),
             "server.py",
             "--backend",
-            "mlx",
+            self.backend,
             "--socket",
             str(self.socket_path),
             "--data-dir",
@@ -124,6 +138,11 @@ class SidecarProcess:
             "--ready-fd",
             str(write_fd),
         ]
+        if self.quantize:
+            argv.append("--quantize")
+        for flag, name in self.models.items():
+            if name:
+                argv += [f"--{flag}", name]
         print(f"  launching {' '.join(argv[1:])}")
         self.proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -659,8 +678,15 @@ async def run(args: argparse.Namespace) -> int:
     frame_rel = pick_frame(db_path, data_dir)
     report = Report()
 
-    section("starting sidecar (real MLX inference)")
-    process = SidecarProcess(args.socket, data_dir, python)
+    section(f"starting sidecar (real {args.backend.upper()} inference)")
+    process = SidecarProcess(
+        args.socket,
+        data_dir,
+        python,
+        args.backend,
+        args.quantize,
+        {"vlm": args.vlm, "llm": args.llm, "embed": args.embed},
+    )
     await process.start()
 
     client = SocketSidecar(
@@ -731,6 +757,24 @@ def main(argv: list[str] | None = None) -> int:
         default=16,
         help="how many seeded summaries to embed for the retrieval check",
     )
+    parser.add_argument(
+        "--backend",
+        choices=("mlx", "cuda"),
+        default="mlx",
+        help="mlx is the macOS verification path; cuda is the Orin itself",
+    )
+    parser.add_argument(
+        "--quantize",
+        action="store_true",
+        help="pass --quantize to a cuda sidecar; required on Orin, where the "
+        "fp16 models do not fit in 15.6GB of shared memory",
+    )
+    for flag in ("vlm", "llm", "embed"):
+        parser.add_argument(
+            f"--{flag}",
+            default=None,
+            help=f"override the sidecar's {flag} model (default: the backend's own)",
+        )
     parser.add_argument(
         "--camera",
         default="0",
