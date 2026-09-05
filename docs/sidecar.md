@@ -81,6 +81,22 @@ class Failed(TypedDict):     # kind: "failed"
 
 `Failed` 回來時後端對外翻成 502 `SIDECAR_FAILED`(`spec.md` §2.6);`code` 字串自己取,會進 log,`message` 給人看。
 
+後端**會驗回覆**,不合約定的一律翻成 502 `SIDECAR_FAILED`,不會變成 500 —— `spec.md` §2.6 的錯誤分類沒有「後端自己爛掉」這一格,而且每個 `/api/ask` 都還是欠一列 `queries`(§2.4)。會被擋掉的情況與對應 `code`:
+
+| 情況 | `code` |
+|---|---|
+| 一行超過 1MiB(`READ_LIMIT`)還沒看到 `\n` | `OVERSIZED_REPLY`,**連線會被丟掉重連**(framing 已經壞了,後面每次讀都會從半行開始) |
+| 合法 JSON 但不是 object(array / number / `null` / string) | `BAD_REPLY` |
+| `kind` 對了但缺 payload 欄位(`summary` / `vec` / `answer`) | `BAD_REPLY` |
+| `vec` 不是數字陣列、長短不齊、含 `null` / `NaN` / `inf` | `BAD_REPLY` |
+| `vec` 長度不等於 `--embed-dim` | `BAD_REPLY` |
+| `objects` 不是 list | `BAD_REPLY` |
+| `kind` 不是預期的那個 | `UNEXPECTED_KIND` |
+| 整行不是合法 JSON | `BAD_JSON`,連線丟掉重連 |
+| `req_id` 跟請求不符 | `REQ_ID_MISMATCH` |
+
+`NaN` / `inf` 擋在這裡是必要的:一個 `NaN` 進了檢索表就會讓每個 cosine 分數變 `NaN`,拒答門檻(`--ask-min-score`)靜靜失效,`/api/ask` 從此不再拒答。**`json.dumps` 會把 `float('nan')` 寫成裸 `NaN`,那不是合法 JSON**,Python 這端解得開、別的 client 不一定 —— sidecar 端出手前自己先擋掉。
+
 ## 3.2 Prompt 契約
 
 `Answer.context` 的每個元素是**後端組好的一行字串**,格式固定:

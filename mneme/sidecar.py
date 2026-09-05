@@ -81,10 +81,18 @@ class Sidecar(Protocol):
 class SocketSidecar:
     """Unix-socket client with a background reconnect loop."""
 
-    def __init__(self, socket_path: Path, *, timeout_ms: int, embed_timeout_ms: int) -> None:
+    def __init__(
+        self,
+        socket_path: Path,
+        *,
+        timeout_ms: int,
+        embed_timeout_ms: int,
+        embed_dim: int,
+    ) -> None:
         self.socket_path = socket_path
         self.timeout_s = timeout_ms / 1000.0
         self.embed_timeout_s = embed_timeout_ms / 1000.0
+        self.embed_dim = embed_dim
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         # One in-flight request: the lock *is* the concurrency contract.
@@ -169,6 +177,16 @@ class SocketSidecar:
             except (OSError, ConnectionError) as exc:
                 await self._drop_connection()
                 raise SidecarUnavailable(f"sidecar connection lost: {exc}") from exc
+            except ValueError as exc:
+                # readline() raises ValueError when READ_LIMIT is reached
+                # before a newline. The unread tail of that reply is still
+                # queued, so every later read would resync mid-line: the
+                # framing is poisoned and the socket has to go.
+                await self._drop_connection()
+                raise SidecarFailed(
+                    "OVERSIZED_REPLY",
+                    f"reply exceeded the {READ_LIMIT} byte line limit: {exc}",
+                ) from exc
             if not raw:
                 await self._drop_connection()
                 raise SidecarUnavailable("sidecar closed the connection")
@@ -177,6 +195,13 @@ class SocketSidecar:
             except json.JSONDecodeError as exc:
                 await self._drop_connection()
                 raise SidecarFailed("BAD_JSON", f"unparseable reply: {exc}") from exc
+            if not isinstance(reply, dict):
+                # Valid JSON but not an object: every check below is a
+                # `.get`, so this would surface as AttributeError -> 500.
+                # The line was framed correctly, so the connection survives.
+                raise SidecarFailed(
+                    "BAD_REPLY", f"expected a JSON object, got {type(reply).__name__}"
+                )
         if reply.get("kind") == "failed":
             raise SidecarFailed(
                 str(reply.get("code", "UNKNOWN")), str(reply.get("message", ""))
@@ -193,14 +218,39 @@ class SocketSidecar:
             self.timeout_s,
         )
         _expect(reply, "described")
-        return str(reply["summary"]), [str(o) for o in reply.get("objects", [])]
+        summary = _require(reply, "summary")
+        objects = reply.get("objects", [])
+        if not isinstance(objects, list):
+            raise SidecarFailed(
+                "BAD_REPLY", f"objects must be a list, got {type(objects).__name__}"
+            )
+        return str(summary), [str(o) for o in objects]
 
     async def embed(self, text: str) -> np.ndarray:
         reply = await self._rpc(
             {"kind": "embed", "req_id": str(ULID()), "text": text}, self.embed_timeout_s
         )
         _expect(reply, "embedded")
-        return np.asarray(reply["vec"], dtype=np.float32)
+        try:
+            vec = np.asarray(_require(reply, "vec"), dtype=np.float32)
+        except (TypeError, ValueError) as exc:
+            # A ragged or non-numeric `vec` is the sidecar's bug, not ours.
+            raise SidecarFailed("BAD_REPLY", f"vec is not a float array: {exc}") from exc
+        if vec.ndim != 1 or vec.size == 0 or not np.isfinite(vec).all():
+            # A vector with a NaN would poison every cosine score it touches
+            # and silently disable the refusal threshold, so refuse it here.
+            raise SidecarFailed(
+                "BAD_REPLY",
+                f"vec must be a non-empty finite 1-D array, got shape {vec.shape}",
+            )
+        if vec.size != self.embed_dim:
+            # sidecar.md 3.1: len(vec) == --embed-dim. Otherwise the handler
+            # would hand it to SearchIndex.search, whose DimensionMismatch is
+            # raised outside ask.py's guard -> 500 with no `queries` row.
+            raise SidecarFailed(
+                "BAD_REPLY", f"vec has {vec.size} dims, expected {self.embed_dim}"
+            )
+        return vec
 
     async def answer(self, question: str, context: list[str]) -> str:
         reply = await self._rpc(
@@ -208,12 +258,20 @@ class SocketSidecar:
             self.timeout_s,
         )
         _expect(reply, "answered")
-        return str(reply["answer"])
+        return str(_require(reply, "answer"))
 
 
 def _expect(reply: dict[str, Any], kind: str) -> None:
     if reply.get("kind") != kind:
         raise SidecarFailed("UNEXPECTED_KIND", f"expected {kind}, got {reply.get('kind')!r}")
+
+
+def _require(reply: dict[str, Any], field: str) -> Any:
+    """A reply of the right `kind` still has to carry its payload. Missing it
+    would be a bare KeyError, i.e. a 500 outside the spec 2.6 taxonomy."""
+    if field not in reply:
+        raise SidecarFailed("BAD_REPLY", f"{reply.get('kind')} reply has no {field!r} field")
+    return reply[field]
 
 
 MOCK_SENTENCES: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -360,4 +418,5 @@ def build_sidecar(config, embed_timeout_ms: int) -> Sidecar:
         config.sidecar,
         timeout_ms=config.sidecar_timeout_ms,
         embed_timeout_ms=embed_timeout_ms,
+        embed_dim=config.embed_dim,
     )
