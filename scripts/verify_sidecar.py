@@ -517,7 +517,7 @@ async def check_retrieval_and_refusal(
         ", ".join(f"{s:.3f}" for _, s in hits),
     )
     report.check(
-        "grounded top score clears --ask-min-score",
+        "floor guard does not eat a grounded question",
         hits[0][1] >= min_score,
         f"{hits[0][1]:.3f} >= {min_score}",
     )
@@ -533,32 +533,30 @@ async def check_retrieval_and_refusal(
         f"{unseen_top:.3f} (separation {grounded_top - unseen_top:.3f})"
     )
 
+    # spec.md 2.4 (v1.5) names the prompt as the primary refusal path, so this
+    # exercises it unconditionally instead of branching on whether the floor
+    # guard happened to fire. bge-m3's Chinese cosine has a floor near 0.7 and
+    # the witnessed/unwitnessed separation is ~0.1, so --ask-min-score (tuned
+    # against the mock's near-zero cosine for unrelated text) will not gate
+    # this question -- and even if a future threshold did, the prompt still has
+    # to hold on its own. Citations stay attached either way.
     if unseen_top < min_score:
-        report.check(
-            "unwitnessed question refused by the score gate",
-            True,
-            f"{unseen_top:.3f} < {min_score}",
+        report.note(
+            f"floor guard would also have caught this ({unseen_top:.3f} < {min_score}); "
+            "verifying the §3.2 prompt path regardless"
         )
-        answer = REFUSAL
     else:
-        # This is the real-model reality, and spec.md 2.4 allows for it: the
-        # LLM may decide the context is insufficient, and then citations are
-        # still attached honestly. bge-m3's Chinese cosine floor is around
-        # 0.6-0.7, so --ask-min-score 0.35 (calibrated against the mock's
-        # bag-of-bigrams, which lands unrelated text near 0) does not fire.
-        # The refusal therefore has to come from the prompt contract, and that
-        # is exactly what must be verified before the Orin demo.
         report.note(
             f"--ask-min-score {min_score} does not gate real bge-m3 "
-            f"(unwitnessed scores {unseen_top:.3f}); refusal must come from §3.2"
+            f"(unwitnessed scores {unseen_top:.3f}); refusal comes from §3.2"
         )
-        kept = [(eid, s) for eid, s in hits if s >= min_score][:3]
-        context = []
-        for position, (event_id, _) in enumerate(kept, start=1):
-            ts, summary = corpus[int(event_id.split("_")[1])]
-            context.append(context_line(position, ts, summary))
-        answer = await sidecar.answer(unseen, context)
-        report.note(f"answer to an unwitnessed question: {answer}")
+    kept = [(eid, s) for eid, s in hits if s >= min_score][:3]
+    context = []
+    for position, (event_id, _) in enumerate(kept, start=1):
+        ts, summary = corpus[int(event_id.split("_")[1])]
+        context.append(context_line(position, ts, summary))
+    answer = await sidecar.answer(unseen, context)
+    report.note(f"answer to an unwitnessed question ({len(context)} cited): {answer}")
 
     report.check(
         "unwitnessed question is refused, not fabricated",
@@ -725,7 +723,7 @@ def main(argv: list[str] | None = None) -> int:
         "--ask-min-score",
         type=float,
         default=0.35,
-        help="the production default from backend.md 8.3",
+        help="the production floor guard from backend.md 8.3, not a semantic judge",
     )
     parser.add_argument(
         "--corpus",
