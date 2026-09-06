@@ -30,6 +30,12 @@ split across three files with **continuous, non-overlapping section numbers** (s
 | [`docs/backend.md`](docs/backend.md) | §1 SQLite schema, §3.3 pipeline shape, §4 fake-data seed, §8 backend implementation contract (except §8.5) | Backend implementer |
 | [`docs/sidecar.md`](docs/sidecar.md) | §3.1 wire protocol, §3.2 prompt contract, §8.5 mock sidecar | Whoever writes the VLM/LLM/embedding inference process |
 
+`docs/operations.md` is *not* contract and carries no version header: it is the
+deployment/field-ops notes (install, what `start.sh` actually runs, verification, and the
+Jetson-specific traps also summarised below). README.md is the public-facing document —
+problem, architecture, design decisions, quick start, API, disclosure — and deliberately
+links out rather than repeating any of the above.
+
 **Read the relevant doc(s) before writing code that touches the HTTP API, the DB schema,
 the sidecar wire protocol, or the CLI/env surface.** These are cross-referenced by section
 number (e.g. `backend.md §8.3`), not duplicated — do not guess a JSON shape, error code, or
