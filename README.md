@@ -133,16 +133,19 @@ sidecar/.venv/bin/pip install -r sidecar/requirements-mlx.txt
 
 | 項目 | 來源 | 授權 |
 |---|---|---|
-| VLM 模型權重 |  |  |
-| Embedding 模型 |  |  |
-| LLM 權重 |  |  |
+| VLM 權重(Orin 實際使用) | [`Qwen/Qwen2.5-VL-3B-Instruct-AWQ`](https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct-AWQ) | Qwen RESEARCH LICENSE |
+| LLM 權重(Orin 實際使用) | 同上 —— 一顆 VL 模型同時擔任 describe 與 answer(見 [`vLLM/README.md`](./vLLM/README.md)) | Qwen RESEARCH LICENSE |
+| Embedding 模型 | [`BAAI/bge-m3`](https://huggingface.co/BAAI/bge-m3)(1024 維) | MIT |
+| VLM / LLM 預設值(未指定 `--vlm-url` 時) | [`HuggingFaceTB/SmolVLM2-2.2B-Instruct`](https://huggingface.co/HuggingFaceTB/SmolVLM2-2.2B-Instruct)、[`Qwen/Qwen2.5-7B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct) | 皆 Apache-2.0 |
+| macOS 驗證用權重(`--backend mlx`) | `mlx-community` 的同三顆模型量化版 | 同上游(Apache-2.0 / MIT) |
 | JetPack / CUDA | NVIDIA 官方映像 | NVIDIA 授權條款 |
-| Python 相依套件 | 見 `pyproject.toml`、`sidecar/requirements.txt` | 各自授權 |
+| vLLM 推論引擎 | [vllm-project/vllm](https://github.com/vllm-project/vllm),透過 [dusty-nv/jetson-containers](https://github.com/dusty-nv/jetson-containers) 的 Jetson 映像執行 | Apache-2.0 / MIT |
+| 前端 vendored JS | React + ReactDOM 18.3.1、[htm](https://github.com/developit/htm) | MIT / Apache-2.0 |
+| Python 相依套件 | 見 `pyproject.toml`、`sidecar/requirements.txt`、`sidecar/requirements-mlx.txt` | 各自授權 |
 
-本專案程式碼於 2026/09/04–09/06 賽期內撰寫,未使用團隊既有專案程式。示範用的 seed 資料為賽期內於現場錄製。
+本專案程式碼於 2026/09/04–09/06 賽期內撰寫,未使用團隊既有專案程式。示範用的 seed 資料由賽期內撰寫的 `python -m mneme.seed` 以固定亂數種子程式產生(色塊佔位圖 + 內建中文句庫),不含任何既有素材;實際展示的畫面為現場攝影機即時拍攝。
 
 ---
-
 
 ## 授權
 
